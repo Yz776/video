@@ -219,3 +219,27 @@ Stage Summary:
 - ✅ Token tidak bocor di git config (one-shot URL)
 - Repo sekarang berisi semua source code project kangwifi cam (camera-app, controls, gallery, utils, types, process route, cloud-* routes)
 - ⚠️ Token user masih aktif — sarankan revoke setelah selesai di https://github.com/settings/tokens
+
+---
+Task ID: easy-run-scripts
+Agent: main (Super Z)
+Task: User request "buat agar gampang runnya" — buat one-click setup & run scripts
+
+Work Log:
+- Created `.env.example` with `DATABASE_URL=file:./db/custom.db`
+- Created `setup.sh` (Linux/macOS): cek Node v18+, setup .env, npm install, prisma generate + db push, build
+- Created `setup.bat` (Windows): versi CMD equivalent
+- Created `run.sh` (Linux/macOS): auto-cek .env + node_modules + Prisma, lalu `npm run dev|start`
+- Created `run.bat` (Windows): versi CMD equivalent
+- Created `README.md`: Quick Start (Linux/Windows/Manual), Requirements, Akses HP via localtunnel/ADB/Vercel, Scripts table, Tech Stack, Project Structure, Troubleshooting
+- Updated `.gitignore`: allow `.env.example` (sebelumnya ke-ignore karena pattern `.env*`)
+- Tested `setup.sh` end-to-end di environment sendiri → build sukses, semua step jalan
+- Committed: `f50183e` — 7 files changed, 400 insertions
+- Pushed ke https://github.com/Yz776/video.git (781af4d..f50183e)
+
+Stage Summary:
+- ✅ One-click setup scripts untuk Linux/macOS/Windows
+- ✅ One-click run scripts dengan auto-bootstrap
+- ✅ README lengkap dengan troubleshooting
+- ✅ `.env.example` committed (bisa di-copy langsung jadi `.env`)
+- User sekarang tinggal: `git clone ... && cd ... && bash setup.sh && bash run.sh`
