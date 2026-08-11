@@ -35,144 +35,173 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-interface GalleryStripProps {
-  items: CaptureItem[];
-  onOpen: (item: CaptureItem) => void;
-  onClear: () => void;
+// ============================================================
+// CloudStrip — horizontal strip showing the N most-recent files
+// from the cloud (https://cloud.kangwifi.eu.org). Replaces the old
+// local GalleryStrip. 100% cloud: no local blob URLs are kept
+// after capture — photos go straight to cloud and are listed here.
+// ============================================================
+
+interface CloudStripProps {
+  files: CloudFile[];
+  loading: boolean;
+  onOpen: (file: CloudFile) => void;
+  onOpenCloud: () => void;
+  onRefresh: () => void;
 }
 
-export function GalleryStrip({ items, onOpen, onClear }: GalleryStripProps) {
-  if (items.length === 0) {
-    return (
-      <div className="h-12 flex items-center text-[11px] text-white/40">
-        Belum ada hasil
-      </div>
-    );
-  }
+export function CloudStrip({
+  files,
+  loading,
+  onOpen,
+  onOpenCloud,
+  onRefresh,
+}: CloudStripProps) {
   return (
     <div className="flex items-center gap-2 overflow-x-auto no-scrollbar h-12">
-      <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-300/15 text-[10px] text-amber-300 font-bold flex-shrink-0">
-        {items.length}
-      </div>
-      {items.map((it) => (
-        <button
-          key={it.id}
-          onClick={() => onOpen(it)}
-          className="relative size-12 rounded-lg overflow-hidden flex-shrink-0 border border-white/20 active:scale-95 transition-transform"
-        >
-          {it.kind === "video" ? (
-            <div className="size-full bg-zinc-800 flex items-center justify-center">
-              <Play className="size-4 text-white fill-white" />
-            </div>
-          ) : (
-            <ThumbPreview item={it} />
-          )}
-          {it.kind === "live" && (
-            <span className="absolute top-0.5 right-0.5 px-1 rounded bg-amber-300 text-[8px] font-bold text-black">
-              LIVE
-            </span>
-          )}
-          {it.kind === "burst" && (
-            <span className="absolute top-0.5 right-0.5 px-1 rounded bg-sky-300 text-[8px] font-bold text-black">
-              B×{it.burstCount ?? 5}
-            </span>
-          )}
-          {it.kind === "video" && (
-            <span className="absolute bottom-0.5 left-0.5 px-1 rounded bg-black/60 text-[8px] font-bold text-white">
-              VID
-            </span>
-          )}
-          {it.upscaled && (
-            <span className="absolute bottom-0.5 right-0.5 px-0.5 rounded bg-emerald-500/80 text-[7px] font-bold text-white">
-              HD
-            </span>
-          )}
-          {it.cloudUrl && (
-            <span
-              className="absolute top-0.5 left-0.5 size-2 rounded-full bg-sky-400 shadow-[0_0_4px_rgba(56,189,248,0.8)]"
-              title="Sudah di-upload ke cloud"
-            />
-          )}
-        </button>
-      ))}
       <button
-        onClick={onClear}
-        className="size-12 rounded-lg flex-shrink-0 bg-white/5 flex items-center justify-center active:scale-95 transition-transform"
-        aria-label="Clear gallery"
+        onClick={onOpenCloud}
+        className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-sky-500/15 text-sky-300 text-[10px] font-bold flex-shrink-0 active:scale-95 transition-transform"
+        aria-label="Buka cloud gallery"
       >
-        <Trash2 className="size-4 text-white/60" />
+        <Cloud className="size-3" />
+        {files.length > 0 ? files.length : "—"}
       </button>
+
+      {loading && files.length === 0 && (
+        <div className="flex items-center gap-1.5 text-[11px] text-white/40">
+          <Loader2 className="size-3 animate-spin" />
+          Memuat cloud…
+        </div>
+      )}
+
+      {!loading && files.length === 0 && (
+        <div className="text-[11px] text-white/40">
+          Belum ada foto di cloud — capture untuk mulai
+        </div>
+      )}
+
+      {files.slice(0, 10).map((f) => (
+        <CloudStripThumb key={f.key} file={f} onClick={() => onOpen(f)} />
+      ))}
+
+      {files.length > 0 && (
+        <button
+          onClick={onRefresh}
+          disabled={loading}
+          className="size-12 rounded-lg flex-shrink-0 bg-white/5 flex items-center justify-center active:scale-95 transition-transform disabled:opacity-50"
+          aria-label="Refresh cloud"
+        >
+          <RefreshCw className={cn("size-4 text-white/60", loading && "animate-spin")} />
+        </button>
+      )}
     </div>
   );
 }
 
-function ThumbPreview({ item }: { item: CaptureItem }) {
+function CloudStripThumb({
+  file,
+  onClick,
+}: {
+  file: CloudFile;
+  onClick: () => void;
+}) {
   const [err, setErr] = useState(false);
-  if (err) {
-    return (
-      <div className="size-full bg-zinc-800 flex items-center justify-center">
-        <Camera className="size-4 text-white/60" />
-      </div>
-    );
-  }
+  const isHeic = /\.heic?$/i.test(file.name) || file.mime === "image/heic";
+  const isVideo = /^video\//i.test(file.mime ?? "") || /\.(webm|mp4|mov)$/i.test(file.name);
   return (
-    <img
-      src={item.previewUrl}
-      alt="thumb"
-      className="size-full object-cover"
-      onError={() => setErr(true)}
-    />
+    <button
+      onClick={onClick}
+      className="relative size-12 rounded-lg overflow-hidden flex-shrink-0 border border-white/20 active:scale-95 transition-transform bg-zinc-900"
+      aria-label={file.name}
+    >
+      {isHeic || err || isVideo ? (
+        <div className="size-full flex items-center justify-center">
+          {isVideo ? (
+            <Play className="size-4 text-white fill-white" />
+          ) : (
+            <Aperture className="size-4 text-amber-300" />
+          )}
+        </div>
+      ) : (
+        <img
+          src={file.url}
+          alt={file.name}
+          loading="lazy"
+          className="size-full object-cover"
+          onError={() => setErr(true)}
+        />
+      )}
+      <span className="absolute top-0.5 right-0.5 size-2 rounded-full bg-sky-400 shadow-[0_0_4px_rgba(56,189,248,0.8)]" />
+    </button>
   );
 }
 
-interface PreviewModalProps {
-  item: CaptureItem | null;
-  onClose: () => void;
-  onDelete: (id: string) => void;
-  onItemUpdate?: (item: CaptureItem) => void;
+// ============================================================
+// JustCapturedModal — shows immediately after a capture is
+// processed AND uploaded to cloud. Displays the local blob
+// preview (still in memory at this point), the cloud URL,
+// and quick actions: share link / copy / open cloud / dismiss.
+// Once dismissed, the local blob URL is revoked — no local
+// gallery state remains.
+// ============================================================
+
+export interface JustCapturedInfo {
+  id: string;
+  previewUrl: string; // blob URL of JPEG preview (or HEIC if no preview)
+  downloadUrl: string; // blob URL of HEIC file
+  filename: string;
+  mime: string;
+  width?: number;
+  height?: number;
+  size: number;
+  cloudUrl: string;
+  cloudKey?: string;
+  hfUrl?: string | null;
+  kind: CaptureItem["kind"];
+  burstCount?: number;
 }
 
-export function PreviewModal({ item, onClose, onDelete, onItemUpdate }: PreviewModalProps) {
-  const [showInfo, setShowInfo] = useState(false);
-  const [uploadState, setUploadState] = useState<
-    | { status: "idle" }
-    | { status: "uploading" }
-    | { status: "done"; url: string; hfUrl?: string | null }
-    | { status: "error"; msg: string }
-  >({ status: "idle" });
+interface JustCapturedModalProps {
+  info: JustCapturedInfo | null;
+  onClose: () => void;
+  onOpenCloud: () => void;
+}
+
+export function JustCapturedModal({
+  info,
+  onClose,
+  onOpenCloud,
+}: JustCapturedModalProps) {
   const [copied, setCopied] = useState(false);
 
-  // Reset upload state when item changes
   useEffect(() => {
-    setUploadState(
-      item?.cloudUrl
-        ? { status: "done", url: item.cloudUrl, hfUrl: null }
-        : { status: "idle" },
-    );
-    setCopied(false);
-  }, [item?.id, item?.cloudUrl]);
+    if (!info) {
+      setCopied(false);
+    }
+  }, [info]);
 
-  if (!item) return null;
+  if (!info) return null;
+
+  const isVideo = info.kind === "video";
+  const isLive = info.kind === "live";
 
   const handleDownload = () => {
     const a = document.createElement("a");
-    a.href = item.downloadUrl;
-    a.download = item.filename;
+    a.href = info.downloadUrl;
+    a.download = info.filename;
     document.body.appendChild(a);
     a.click();
     a.remove();
   };
 
-  const handleShare = async () => {
+  const handleShareFile = async () => {
     try {
-      const res = await fetch(item.downloadUrl);
+      const res = await fetch(info.downloadUrl);
       const blob = await res.blob();
-      const file = new File([blob], item.filename, { type: item.mime });
+      const file = new File([blob], info.filename, { type: info.mime });
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        await navigator.share({
-          files: [file],
-          title: "kangwifi cam",
-        });
+        await navigator.share({ files: [file], title: "kangwifi cam" });
       } else {
         handleDownload();
       }
@@ -181,45 +210,9 @@ export function PreviewModal({ item, onClose, onDelete, onItemUpdate }: PreviewM
     }
   };
 
-  const handleUploadToCloud = async () => {
-    setUploadState({ status: "uploading" });
-    try {
-      const res = await fetch(item.downloadUrl);
-      const blob = await res.blob();
-      const result = await uploadToCloud(blob, item.filename, item.mime);
-      if (!result.success || !result.url) {
-        setUploadState({
-          status: "error",
-          msg: result.error ?? "Upload gagal",
-        });
-        return;
-      }
-      setUploadState({
-        status: "done",
-        url: result.url,
-        hfUrl: result.hfUrl,
-      });
-      // Update the capture item so the gallery thumb shows cloud badge
-      if (onItemUpdate) {
-        onItemUpdate({
-          ...item,
-          cloudUrl: result.url,
-          cloudKey: result.key,
-          cloudUploadedAt: new Date().toISOString(),
-        });
-      }
-    } catch (e) {
-      setUploadState({
-        status: "error",
-        msg: e instanceof Error ? e.message : "Upload gagal",
-      });
-    }
-  };
-
   const handleCopyLink = async () => {
-    if (uploadState.status !== "done") return;
     try {
-      await navigator.clipboard.writeText(uploadState.url);
+      await navigator.clipboard.writeText(info.cloudUrl);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
@@ -228,13 +221,12 @@ export function PreviewModal({ item, onClose, onDelete, onItemUpdate }: PreviewM
   };
 
   const handleShareLink = async () => {
-    if (uploadState.status !== "done") return;
     if (navigator.share) {
       try {
         await navigator.share({
           title: "kangwifi cam",
           text: "Foto dari kangwifi cam",
-          url: uploadState.url,
+          url: info.cloudUrl,
         });
       } catch {
         // user cancelled
@@ -256,133 +248,100 @@ export function PreviewModal({ item, onClose, onDelete, onItemUpdate }: PreviewM
           <X className="size-5 text-white" />
         </button>
         <div className="text-center">
-          <div className="text-xs text-white/60">
-            {new Date(item.createdAt).toLocaleString("id-ID")}
+          <div className="text-xs font-bold text-sky-300 flex items-center gap-1 justify-center">
+            <Check className="size-3.5" />
+            Tersimpan di Cloud
           </div>
           <div className="text-[11px] text-white/40">
-            {item.width && item.height
-              ? `${item.width}×${item.height} · ${formatBytes(item.size)}`
-              : formatBytes(item.size)}
+            {info.width && info.height
+              ? `${info.width}×${info.height} · ${formatBytes(info.size)}`
+              : formatBytes(info.size)}
           </div>
         </div>
         <button
-          onClick={() => setShowInfo((s) => !s)}
-          className={cn(
-            "size-10 rounded-full backdrop-blur-md flex items-center justify-center",
-            showInfo ? "bg-amber-300 text-black" : "bg-black/50 text-white",
-          )}
-          aria-label="Info"
+          onClick={onOpenCloud}
+          className="size-10 rounded-full bg-sky-500/20 flex items-center justify-center"
+          aria-label="Open cloud gallery"
         >
-          <Info className="size-5" />
+          <Cloud className="size-5 text-sky-300" />
         </button>
       </div>
 
       {/* Main preview */}
       <div className="flex-1 flex items-center justify-center px-4 relative">
-        <PreviewContent item={item} />
+        {isVideo ? (
+          <video
+            src={info.previewUrl}
+            className="max-w-full max-h-full rounded-lg"
+            controls
+            autoPlay
+            playsInline
+            loop
+          />
+        ) : (
+          <JustCapturedPreview info={info} />
+        )}
       </div>
 
-      {/* Cloud upload status panel */}
-      {uploadState.status === "done" && (
-        <div className="px-4 py-3 bg-sky-950/60 border-t border-sky-800/50 backdrop-blur-md">
-          <div className="max-w-md mx-auto space-y-2">
-            <div className="flex items-center gap-2 text-sky-300 text-xs font-bold">
-              <Check className="size-4" />
-              Berhasil di-upload ke cloud
-            </div>
-            <div className="flex items-center gap-1.5">
-              <input
-                readOnly
-                value={uploadState.url}
-                className="flex-1 px-2.5 py-1.5 bg-black/40 rounded-lg text-[11px] text-white/90 font-mono border border-sky-800/50"
-              />
-              <button
-                onClick={handleCopyLink}
-                className="size-8 rounded-lg bg-sky-500/20 text-sky-300 flex items-center justify-center active:scale-95"
-                aria-label="Copy link"
-              >
-                {copied ? (
-                  <Check className="size-4" />
-                ) : (
-                  <Link2 className="size-4" />
-                )}
-              </button>
-              <a
-                href={uploadState.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="size-8 rounded-lg bg-sky-500/20 text-sky-300 flex items-center justify-center active:scale-95"
-                aria-label="Open in new tab"
-              >
-                <ExternalLink className="size-4" />
-              </a>
-              <button
-                onClick={handleShareLink}
-                className="size-8 rounded-lg bg-sky-500/20 text-sky-300 flex items-center justify-center active:scale-95"
-                aria-label="Share link"
-              >
-                <Share2 className="size-4" />
-              </button>
-            </div>
+      {/* Cloud URL panel */}
+      <div className="px-4 py-3 bg-sky-950/60 border-t border-sky-800/50 backdrop-blur-md">
+        <div className="max-w-md mx-auto space-y-2">
+          <div className="flex items-center gap-2 text-sky-300 text-xs font-bold">
+            <Check className="size-4" />
+            Berhasil di-upload ke cloud
+          </div>
+          <div className="flex items-center gap-1.5">
+            <input
+              readOnly
+              value={info.cloudUrl}
+              className="flex-1 px-2.5 py-1.5 bg-black/40 rounded-lg text-[11px] text-white/90 font-mono border border-sky-800/50"
+            />
+            <button
+              onClick={handleCopyLink}
+              className="size-8 rounded-lg bg-sky-500/20 text-sky-300 flex items-center justify-center active:scale-95"
+              aria-label="Copy link"
+            >
+              {copied ? <Check className="size-4" /> : <Link2 className="size-4" />}
+            </button>
             <a
-              href={CLOUD_URL}
+              href={info.cloudUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-[10px] text-sky-400/70 hover:text-sky-300 inline-flex items-center gap-1"
+              className="size-8 rounded-lg bg-sky-500/20 text-sky-300 flex items-center justify-center active:scale-95"
+              aria-label="Open in new tab"
             >
-              <Cloud className="size-3" />
-              Buka cloud.kangwifi.eu.org
+              <ExternalLink className="size-4" />
             </a>
+            <button
+              onClick={handleShareLink}
+              className="size-8 rounded-lg bg-sky-500/20 text-sky-300 flex items-center justify-center active:scale-95"
+              aria-label="Share link"
+            >
+              <Share2 className="size-4" />
+            </button>
           </div>
+          <a
+            href={CLOUD_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[10px] text-sky-400/70 hover:text-sky-300 inline-flex items-center gap-1"
+          >
+            <Cloud className="size-3" />
+            Buka cloud.kangwifi.eu.org
+          </a>
         </div>
-      )}
-      {uploadState.status === "error" && (
-        <div className="px-4 py-3 bg-red-950/60 border-t border-red-800/50 backdrop-blur-md">
-          <div className="max-w-md mx-auto text-red-300 text-xs">
-            Gagal upload: {uploadState.msg}
-          </div>
-        </div>
-      )}
-
-      {/* Info panel */}
-      {showInfo && (
-        <div className="px-4 py-3 bg-zinc-950/80 backdrop-blur-md border-t border-zinc-800">
-          <InfoPanel item={item} />
-        </div>
-      )}
+      </div>
 
       {/* Bottom actions */}
       <div className="px-6 pt-4 pb-[max(env(safe-area-inset-bottom),2rem)] bg-gradient-to-t from-black/80 to-transparent">
         <div className="flex items-center justify-center gap-2">
           <Button
-            onClick={handleShare}
+            onClick={handleShareFile}
             variant="secondary"
             className="flex-1 max-w-[110px] bg-zinc-800 text-white hover:bg-zinc-700 border-0"
           >
             <Share2 className="size-4" />
             Share
-          </Button>
-          <Button
-            onClick={handleUploadToCloud}
-            disabled={uploadState.status === "uploading" || uploadState.status === "done"}
-            className="flex-1 max-w-[140px] bg-sky-500 text-white hover:bg-sky-400 disabled:opacity-50"
-          >
-            {uploadState.status === "uploading" ? (
-              <>
-                <Loader2 className="size-4 animate-spin" />
-                Upload…
-              </>
-            ) : uploadState.status === "done" ? (
-              <>
-                <Check className="size-4" />
-                Cloud
-              </>
-            ) : (
-              <>
-                <CloudUpload className="size-4" />
-                Cloud
-              </>
-            )}
           </Button>
           <Button
             onClick={handleDownload}
@@ -391,32 +350,20 @@ export function PreviewModal({ item, onClose, onDelete, onItemUpdate }: PreviewM
             <Download className="size-4" />
             Unduh
           </Button>
+          <Button
+            onClick={onClose}
+            className="flex-1 max-w-[140px] bg-sky-500 text-white hover:bg-sky-400"
+          >
+            <Check className="size-4" />
+            Selesai
+          </Button>
         </div>
       </div>
     </div>
   );
 }
 
-function PreviewContent({ item }: { item: CaptureItem }) {
-  if (item.kind === "video") {
-    return (
-      <video
-        src={item.previewUrl}
-        className="max-w-full max-h-full rounded-lg"
-        controls
-        autoPlay
-        playsInline
-        loop
-      />
-    );
-  }
-  if (item.kind === "live") {
-    return <LivePhotoPreview item={item} />;
-  }
-  return <PhotoPreview item={item} />;
-}
-
-function PhotoPreview({ item }: { item: CaptureItem }) {
+function JustCapturedPreview({ info }: { info: JustCapturedInfo }) {
   const [err, setErr] = useState(false);
   if (err) {
     return (
@@ -434,88 +381,12 @@ function PhotoPreview({ item }: { item: CaptureItem }) {
   }
   return (
     <img
-      src={item.previewUrl}
-      alt={item.filename}
+      src={info.previewUrl}
+      alt={info.filename}
       className="max-w-full max-h-full object-contain rounded-lg"
       onError={() => setErr(true)}
     />
   );
-}
-
-function LivePhotoPreview({ item }: { item: CaptureItem }) {
-  const [playing, setPlaying] = useState(false);
-  if (playing && item.liveVideoUrl) {
-    return (
-      <video
-        src={item.liveVideoUrl}
-        className="max-w-full max-h-full rounded-lg"
-        autoPlay
-        playsInline
-        onEnded={() => setPlaying(false)}
-        controls
-      />
-    );
-  }
-  return (
-    <div className="relative">
-      <PhotoPreview item={item} />
-      <button
-        onClick={() => setPlaying(true)}
-        className="absolute bottom-3 left-3 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-300/90 text-black text-xs font-bold active:scale-95"
-      >
-        <CircleDot className="size-3.5" />
-        Putar Live
-      </button>
-    </div>
-  );
-}
-
-function InfoPanel({ item }: { item: CaptureItem }) {
-  const rows: { label: string; value: string }[] = [
-    { label: "Tipe", value: kindLabel(item.kind) },
-    { label: "Format", value: item.ext.toUpperCase() },
-    {
-      label: "Dimensi",
-      value:
-        item.width && item.height
-          ? `${item.width} × ${item.height} px`
-          : "—",
-    },
-    { label: "Ukuran File", value: formatBytes(item.size) },
-    { label: "Dibuat", value: new Date(item.createdAt).toLocaleString("id-ID") },
-    { label: "Filter", value: item.filter ? item.filter.toUpperCase() : "NONE" },
-    {
-      label: "Upscaled",
-      value: item.upscaled ? "YA" : "TIDAK",
-    },
-    { label: "HDR", value: item.hdr ? "YA" : "TIDAK" },
-  ];
-  if (item.burstCount) {
-    rows.push({ label: "Burst Count", value: String(item.burstCount) });
-  }
-  return (
-    <div className="grid grid-cols-2 gap-x-4 gap-y-2 max-w-md mx-auto">
-      {rows.map((r) => (
-        <div key={r.label} className="flex items-center justify-between gap-2">
-          <span className="text-[11px] text-white/50">{r.label}</span>
-          <span className="text-xs font-bold text-white text-right">
-            {r.value}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function kindLabel(k: CaptureItem["kind"]): string {
-  switch (k) {
-    case "photo": return "Foto";
-    case "video": return "Video";
-    case "live": return "Live Photo";
-    case "burst": return "Burst";
-    case "portrait": return "Portrait";
-    default: return k;
-  }
 }
 
 // ============================================================
@@ -611,7 +482,7 @@ export function CloudGallery({ open, onClose }: CloudGalleryProps) {
             <Cloud className="size-12 mx-auto mb-3 opacity-30" />
             <p>Belum ada foto di cloud.</p>
             <p className="text-xs mt-1 text-white/30">
-              Upload foto dari galeri, lalu refresh di sini.
+              Capture foto untuk langsung upload ke cloud.
             </p>
           </div>
         )}
@@ -664,14 +535,19 @@ function CloudThumb({
   const [err, setErr] = useState(false);
   // HEIC files can't be rendered in <img>, so we just show an icon
   const isHeic = /\.heic?$/i.test(file.name) || file.mime === "image/heic";
+  const isVideo = /^video\//i.test(file.mime ?? "") || /\.(webm|mp4|mov)$/i.test(file.name);
   return (
     <button
       onClick={onClick}
       className="relative aspect-square rounded-lg overflow-hidden bg-zinc-900 border border-white/10 active:scale-95 transition-transform"
     >
-      {isHeic || err ? (
+      {isHeic || isVideo || err ? (
         <div className="size-full flex flex-col items-center justify-center p-1">
-          <Aperture className="size-6 text-amber-300" />
+          {isVideo ? (
+            <Play className="size-6 text-white fill-white" />
+          ) : (
+            <Aperture className="size-6 text-amber-300" />
+          )}
           <span className="text-[8px] text-white/60 mt-1 truncate w-full text-center">
             {file.name.split(".").pop()?.toUpperCase()}
           </span>
@@ -712,6 +588,7 @@ function CloudFileDetail({
   onCopyUrl: () => void;
 }) {
   const isHeic = /\.heic?$/i.test(file.name) || file.mime === "image/heic";
+  const isVideo = /^video\//i.test(file.mime ?? "") || /\.(webm|mp4|mov)$/i.test(file.name);
   const [copied, setCopied] = useState(false);
 
   const copy = async () => {
@@ -748,7 +625,14 @@ function CloudFileDetail({
       </div>
 
       <div className="flex-1 flex items-center justify-center px-4">
-        {isHeic ? (
+        {isVideo ? (
+          <video
+            src={file.url}
+            className="max-w-full max-h-full rounded-lg"
+            controls
+            playsInline
+          />
+        ) : isHeic ? (
           <div className="text-center space-y-3">
             <div className="size-24 mx-auto rounded-2xl bg-zinc-900 flex items-center justify-center">
               <Aperture className="size-10 text-amber-300" />

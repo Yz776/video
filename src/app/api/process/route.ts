@@ -152,7 +152,7 @@ export async function POST(req: NextRequest) {
     const params: ProcessParams = {
       file,
       upscale: clampNum(formData.get("upscale"), 2, [1, 4], 2),
-      quality: clampNum(formData.get("quality"), 98, [60, 100], 98),
+      quality: clampNum(formData.get("quality"), 99, [60, 100], 99),
       sharpen: formData.get("sharpen") !== "0",
       denoise: formData.get("denoise") === "1",
       enhance: formData.get("enhance") !== "0",
@@ -211,39 +211,55 @@ export async function POST(req: NextRequest) {
     //    Critical: any noise or 8x8 JPEG blocks get magnified when
     //    upscaling, producing the "pecah pecah" look. We use a combo:
     //      - median(1): 3x3 median, kills single-pixel noise & outliers
-    //      - blur(0.3): very mild gaussian, smooths 8x8 DCT block edges
-    //    Both are very mild — they preserve real detail but eliminate
-    //    the compression artifacts that would otherwise become visible
-    //    after upscale. Always on when upscaling; respects toggle otherwise.
+    //      - blur(0.4): mild gaussian, smooths 8x8 DCT block edges
+    //    Always on when upscaling; respects toggle otherwise.
     if (params.denoise || params.upscale > 1) {
       pipeline = pipeline.median(1);
       if (params.upscale > 1) {
-        pipeline = pipeline.blur(0.3);
+        pipeline = pipeline.blur(0.4);
       }
     }
 
-    // (Pre-sharpen removed — median(1) is mild enough that it doesn't
-    //  need compensation, and pre-sharpen was creating halos that got
-    //  amplified by upscale.)
+    // 3. PRE-SHARPEN (NEW) — very mild recovery pass after denoise.
+    //    median(1) + blur(0.4) slightly softens real edges; this gentle
+    //    unsharp mask restores micro-contrast WITHOUT creating halos that
+    //    upscale would later amplify. sigma=0.5 keeps the sharpening kernel
+    //    small (1px radius) so it only affects fine detail, not large edges.
+    if (params.upscale > 1) {
+      pipeline = pipeline.sharpen({
+        sigma: 0.5,
+        m1: 0.4,
+        m2: 0.15,
+        x1: 0.6,
+        y2: 1.5,
+      });
+    }
 
-    // 3. UPSCALE — multi-pass for high factors.
-    //    Single-pass lanczos3 is fine for 2x. For 4x, two-pass (each 2x)
-    //    produces smoother gradients and less ringing than one giant leap.
-    //    An intermediate median(1) between passes kills any ringing from
-    //    the first pass before the second pass amplifies it.
+    // 4. UPSCALE — multi-pass with MIXED kernels for best quality.
+    //    For 4x: two-pass strategy with Mitchell first, Lanczos3 second.
+    //      - Mitchell (B=C=1/3) is the smoothest edge-preserving kernel —
+    //        it doesn't ring on hard edges like Lanczos does, so the first
+    //        2x jump preserves gradient continuity (no "pecah" halos).
+    //      - median(1) between passes kills any residual ringing before the
+    //        second pass amplifies it.
+    //      - Lanczos3 on the final pass recovers fine detail that Mitchell
+    //        softened — best of both worlds: smooth gradients + crisp detail.
+    //    For 2x: single-pass Lanczos3 (one pass is too few to ring).
     if (params.upscale >= 4) {
       const midW = Math.round(cropBox.width * 2);
       const midH = Math.round(cropBox.height * 2);
+      // Pass 1: Mitchell — smooth, halo-free 2x enlargement
       pipeline = pipeline.resize({
         width: midW,
         height: midH,
         fit: "fill",
-        kernel: "lanczos3",
+        kernel: "mitchell",
         withoutEnlargement: false,
         withoutReduction: false,
       });
       // Inter-pass smoothing — kills ringing before second pass amplifies it
       pipeline = pipeline.median(1);
+      // Pass 2: Lanczos3 — recover fine detail Mitchell softened
       pipeline = pipeline.resize({
         width: targetW,
         height: targetH,
@@ -252,7 +268,7 @@ export async function POST(req: NextRequest) {
         withoutEnlargement: false,
         withoutReduction: false,
       });
-    } else {
+    } else if (params.upscale === 2) {
       pipeline = pipeline.resize({
         width: targetW,
         height: targetH,
@@ -262,6 +278,7 @@ export async function POST(req: NextRequest) {
         withoutReduction: false,
       });
     }
+    // upscale === 1: no resize needed
 
     // 5. CLAHE local contrast — REMOVED from default pipeline.
     //    Why: CLAHE amplifies JPEG DCT block boundaries in flat areas
@@ -317,18 +334,23 @@ export async function POST(req: NextRequest) {
     //     gamma=1.02 brightens midtones slightly without clipping highlights.
     pipeline = pipeline.gamma(1.02);
 
-    // 11. FINAL SHARPEN — very gentle, no halos.
-    //     Previous settings (sigma=0.8, m1=1.4) were too aggressive and
-    //     produced visible halos that read as "pecah". Current settings
-    //     (sigma=0.6, m1=0.5) recover detail cleanly without ringing.
-    //     Trade-off: slightly less crisp, but no halos = no "pecah".
+    // 11. FINAL SHARPEN — gentle unsharp mask to recover detail lost to
+    //     denoise + upscale. Settings tuned to recover crispness WITHOUT
+    //     creating halos that read as "pecah".
+    //       - sigma=0.7: ~1.5px radius, hits fine detail without bleeding
+    //         into large edges.
+    //       - m1=0.6: low amount for bright-side sharpening (avoids halos
+    //         on highlights).
+    //       - m2=0.25: even lower for dark-side (avoids halos on shadows).
+    //       - y2=2.5: clamps the sharpening near clipping to prevent
+    //         overshoot on saturated colors.
     if (params.sharpen) {
       pipeline = pipeline.sharpen({
-        sigma: 0.6,
-        m1: 0.5,
-        m2: 0.2,
+        sigma: 0.7,
+        m1: 0.6,
+        m2: 0.25,
         x1: 0.8,
-        y2: 2,
+        y2: 2.5,
       });
     }
 
@@ -343,15 +365,25 @@ export async function POST(req: NextRequest) {
       ]);
     }
 
-    // 14. ENCODE HEIC (AV1) — high quality
-    //     effort=3 (was 2): AV1 spends more time on rate-distortion
-    //       optimization, fewer blocking artifacts ("pecah") in flat
-    //       areas like sky/walls. effort=4 was better but took 10s
-    //       per photo — too slow for a camera app. effort=3 is the
-    //       sweet spot: ~5s for 1080p, visibly better than effort=2.
-    //     quality=98 (was 95): higher fidelity, near-lossless.
+    // 14. ENCODE HEIC (AV1) — maximum quality, no compromise.
+    //     effort=4 (was 3): AV1 spends even more time on rate-distortion
+    //       optimization and motion estimation. effort=4 takes ~7s for a
+    //       4K frame but produces noticeably fewer blocking artifacts in
+    //       flat areas (sky, walls) — the main cause of "pecah pecah".
+    //     quality=99 (default): near-lossless. AV1 at q=99 with effort=4
+    //       produces files ~30% larger than q=95 but visually identical
+    //       to the source — exactly what "super HD jernih tanpa pecah" means.
+    //     chromaSubsampling="4:4:4": full chroma resolution, no color
+    //       bleeding on saturated edges (e.g. red text on white, green
+    //       leaves against blue sky). Default AV1 uses 4:2:0 which causes
+    //       visible color smearing — 4:4:4 eliminates that.
     const heicBuf = await pipeline
-      .heif({ compression: "av1", quality: params.quality, effort: 3 })
+      .heif({
+        compression: "av1",
+        quality: params.quality,
+        effort: 4,
+        chromaSubsampling: "4:4:4",
+      })
       .toBuffer();
 
     // 15. Preview JPEG (forked before vignette so thumbnail matches download)

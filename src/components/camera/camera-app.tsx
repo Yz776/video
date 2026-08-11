@@ -5,17 +5,20 @@ import { toast } from "sonner";
 import {
   CameraMode,
   CameraSettings,
-  CaptureItem,
+  CloudFile,
   FacingMode,
   FlashMode,
   DEFAULT_SETTINGS,
 } from "./types";
 import {
   captureFullResolutionPhoto,
+  deleteCloudFile,
   genId,
   getIdealStreamConstraints,
+  listCloudImages,
   pickRecorderMime,
   processToHeic,
+  uploadToCloud,
 } from "./utils";
 import {
   CaptureButton,
@@ -25,9 +28,23 @@ import {
   SettingsSheet,
   TopBar,
 } from "./controls";
-import { GalleryStrip, PreviewModal, CloudGallery } from "./gallery";
+import {
+  CloudStrip,
+  CloudGallery,
+  JustCapturedModal,
+  type JustCapturedInfo,
+} from "./gallery";
 import { cn } from "@/lib/utils";
-import { listCloudImages } from "./utils";
+import {
+  Aperture as ApertureIcon,
+  Check as CheckIcon,
+  Download as DownloadIcon,
+  ExternalLink as ExternalLinkIcon,
+  Link2 as Link2Icon,
+  Play as PlayIcon,
+  Trash2 as Trash2Icon,
+  X as XIcon,
+} from "lucide-react";
 
 export function CameraApp() {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -37,6 +54,7 @@ export function CameraApp() {
   const flashFrameRef = useRef<HTMLDivElement>(null);
   const captureLockRef = useRef(false);
   const deviceOrientationRef = useRef<number>(0);
+  const timerIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const [facing, setFacing] = useState<FacingMode>("environment");
   const [mode, setMode] = useState<CameraMode>("photo");
@@ -46,15 +64,20 @@ export function CameraApp() {
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [processing, setProcessing] = useState<string | null>(null);
-  const [gallery, setGallery] = useState<CaptureItem[]>([]);
-  const [previewItem, setPreviewItem] = useState<CaptureItem | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState<CameraSettings>(DEFAULT_SETTINGS);
   const [timerCountdown, setTimerCountdown] = useState<number | null>(null);
   const [burstCount, setBurstCount] = useState<number>(0);
   const [orientation, setOrientation] = useState(0);
   const [cloudGalleryOpen, setCloudGalleryOpen] = useState(false);
+  const [cloudFiles, setCloudFiles] = useState<CloudFile[]>([]);
+  const [cloudLoading, setCloudLoading] = useState(false);
   const [cloudCount, setCloudCount] = useState<number>(0);
+  const [selectedCloudFile, setSelectedCloudFile] = useState<CloudFile | null>(null);
+  const [justCaptured, setJustCaptured] = useState<JustCapturedInfo | null>(null);
+
+  // Track blob URLs that need cleanup when justCaptured closes
+  const justCapturedUrlsRef = useRef<{ preview?: string; download?: string }>({});
 
   // ---- Camera start / stop ----
   const startCamera = useCallback(
@@ -124,16 +147,27 @@ export function CameraApp() {
     }
   }, [flash]);
 
-  // Device orientation for level indicator
+  // Device orientation for level indicator (throttled via rAF)
   useEffect(() => {
     if (!settings.level) return;
+    let raf = 0;
+    let pending = false;
     const handler = (e: DeviceOrientationEvent) => {
       const gamma = e.gamma ?? 0;
       deviceOrientationRef.current = gamma;
-      setOrientation(gamma);
+      if (!pending) {
+        pending = true;
+        raf = requestAnimationFrame(() => {
+          setOrientation(deviceOrientationRef.current);
+          pending = false;
+        });
+      }
     };
     window.addEventListener("deviceorientation", handler, true);
-    return () => window.removeEventListener("deviceorientation", handler, true);
+    return () => {
+      window.removeEventListener("deviceorientation", handler, true);
+      if (raf) cancelAnimationFrame(raf);
+    };
   }, [settings.level]);
 
   // Recording timer
@@ -148,6 +182,16 @@ export function CameraApp() {
     }, 500);
     return () => clearInterval(t);
   }, [isRecording]);
+
+  // Cleanup timer interval on unmount (defensive — for runWithTimer)
+  useEffect(() => {
+    return () => {
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+        timerIntervalRef.current = null;
+      }
+    };
+  }, []);
 
   // ---- Flash effect ----
   const triggerFlashEffect = useCallback(() => {
@@ -166,17 +210,106 @@ export function CameraApp() {
     }, 360);
   }, []);
 
+  // ---- Cloud list refresh ----
+  const refreshCloud = useCallback(async () => {
+    setCloudLoading(true);
+    const result = await listCloudImages();
+    setCloudLoading(false);
+    if (result.success && result.files) {
+      setCloudFiles(result.files);
+      setCloudCount(result.files.length);
+    }
+  }, []);
+
+  // Fetch cloud count on mount
+  useEffect(() => {
+    refreshCloud();
+  }, [refreshCloud]);
+
+  // Refresh cloud when CloudGallery closes
+  useEffect(() => {
+    if (!cloudGalleryOpen) refreshCloud();
+  }, [cloudGalleryOpen, refreshCloud]);
+
+  // ---- Open cloud gallery if URL has ?cloud=1 (from PWA shortcut) ----
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("cloud") === "1") {
+      setCloudGalleryOpen(true);
+      url.searchParams.delete("cloud");
+      window.history.replaceState({}, "", url.toString());
+    }
+  }, []);
+
+  // ---- Cleanup justCaptured blob URLs when modal closes ----
+  const closeJustCaptured = useCallback(() => {
+    const urls = justCapturedUrlsRef.current;
+    if (urls.preview && urls.preview !== urls.download) {
+      URL.revokeObjectURL(urls.preview);
+    }
+    if (urls.download) URL.revokeObjectURL(urls.download);
+    justCapturedUrlsRef.current = {};
+    setJustCaptured(null);
+    // Refresh cloud strip after dismissing
+    refreshCloud();
+  }, [refreshCloud]);
+
+  // ---- Upload a processed capture to cloud ----
+  const uploadCapture = useCallback(
+    async (
+      heicBlob: Blob,
+      previewBlob: Blob | null,
+      filename: string,
+      mime: string,
+      width: number,
+      height: number,
+      kind: CameraMode,
+    ): Promise<JustCapturedInfo | null> => {
+      setProcessing("Mengunggah ke cloud…");
+      try {
+        const uploadResult = await uploadToCloud(heicBlob, filename, mime);
+        if (!uploadResult.success || !uploadResult.url) {
+          throw new Error(uploadResult.error ?? "Upload cloud gagal");
+        }
+        const previewUrl = previewBlob
+          ? URL.createObjectURL(previewBlob)
+          : URL.createObjectURL(heicBlob);
+        const downloadUrl = URL.createObjectURL(heicBlob);
+        justCapturedUrlsRef.current = { preview: previewUrl, download: downloadUrl };
+        const info: JustCapturedInfo = {
+          id: genId(),
+          previewUrl,
+          downloadUrl,
+          filename,
+          mime,
+          width,
+          height,
+          size: heicBlob.size,
+          cloudUrl: uploadResult.url,
+          cloudKey: uploadResult.key,
+          hfUrl: uploadResult.hfUrl,
+          kind,
+        };
+        return info;
+      } finally {
+        setProcessing(null);
+      }
+    },
+    [],
+  );
+
   // ---- Photo capture (single, with optional live clip) ----
   const capturePhoto = useCallback(
     async (
       alsoCaptureVideoClip = false,
       kindOverride?: CameraMode,
-    ): Promise<CaptureItem | null> => {
+    ): Promise<void> => {
       if (!videoRef.current || !streamRef.current) {
         toast.error("Kamera belum siap");
-        return null;
+        return;
       }
-      if (captureLockRef.current) return null;
+      if (captureLockRef.current) return;
       captureLockRef.current = true;
 
       const shouldFlash =
@@ -188,17 +321,15 @@ export function CameraApp() {
       setProcessing("Memproses HEIC super HD jernih…");
 
       let clipBlob: Blob | null = null;
-      let clipRecorder: MediaRecorder | null = null;
-      let clipChunks: Blob[] = [];
       if (alsoCaptureVideoClip) {
         try {
           const { mime } = pickRecorderMime();
+          const clipChunks: Blob[] = [];
           const r = new MediaRecorder(streamRef.current, {
             mimeType: mime,
             videoBitsPerSecond: 12_000_000,
             audioBitsPerSecond: 192_000,
           });
-          clipChunks = [];
           r.ondataavailable = (e) => {
             if (e.data && e.data.size > 0) clipChunks.push(e.data);
           };
@@ -206,8 +337,7 @@ export function CameraApp() {
             r.onstop = () => resolve(new Blob(clipChunks, { type: mime }));
           });
           r.start();
-          clipRecorder = r;
-          await new Promise((r) => setTimeout(r, 1500));
+          // Record a 1.5s motion clip alongside the still photo
           await new Promise((r) => setTimeout(r, 1500));
           r.stop();
           clipBlob = await clipDone;
@@ -216,7 +346,6 @@ export function CameraApp() {
         }
       }
 
-      let photo: CaptureItem | null = null;
       try {
         const { blob: rawBlob, width, height } = await captureFullResolutionPhoto(
           videoRef.current,
@@ -226,29 +355,41 @@ export function CameraApp() {
         const finalWidth = result.width || width;
         const finalHeight = result.height || height;
         const heicBlob = result.blob;
-        const previewUrl = result.previewBlob
-          ? URL.createObjectURL(result.previewBlob)
-          : URL.createObjectURL(heicBlob);
-        const downloadUrl = URL.createObjectURL(heicBlob);
-        const clipUrl = clipBlob ? URL.createObjectURL(clipBlob) : undefined;
-        photo = {
-          id: genId(),
-          createdAt: new Date().toISOString(),
-          kind: kindOverride ?? (alsoCaptureVideoClip ? "live" : "photo"),
-          previewUrl,
-          downloadUrl,
-          liveVideoUrl: clipUrl,
-          ext: "heic",
-          mime: "image/heic",
-          width: finalWidth,
-          height: finalHeight,
-          size: heicBlob.size,
-          filename: `kangwifi-${Date.now()}.${kindOverride ?? (alsoCaptureVideoClip ? "live" : "photo")}.heic`,
-          filter: settings.filter,
-          upscaled: settings.upscale > 1,
-          hdr: settings.hdr,
-        };
-        setGallery((g) => [photo!, ...g]);
+        const kind = kindOverride ?? (alsoCaptureVideoClip ? "live" : "photo");
+        const filename = `kangwifi-${Date.now()}.${kind}.heic`;
+
+        // Upload to cloud
+        const info = await uploadCapture(
+          heicBlob,
+          result.previewBlob,
+          filename,
+          "image/heic",
+          finalWidth,
+          finalHeight,
+          kind,
+        );
+
+        // If live photo: also upload the video clip
+        if (clipBlob && info) {
+          // Fire-and-forget video upload — don't block the UI
+          const videoFilename = `kangwifi-${Date.now()}.live.webm`;
+          uploadToCloud(clipBlob, videoFilename, clipBlob.type || "video/webm")
+            .then((videoResult) => {
+              if (videoResult.success) {
+                toast.success("Klip Live Photo terupload", {
+                  description: "Video pendek menyertai foto HEIC",
+                });
+              }
+            })
+            .catch((e) => console.warn("Live clip upload failed", e));
+        }
+
+        if (info) {
+          setJustCaptured(info);
+          toast.success("Foto tersimpan di cloud", {
+            description: `${finalWidth}×${finalHeight} · super HD jernih`,
+          });
+        }
       } catch (e) {
         console.error(e);
         const msg = e instanceof Error ? e.message : "Gagal memproses foto";
@@ -257,10 +398,8 @@ export function CameraApp() {
         setProcessing(null);
         captureLockRef.current = false;
       }
-
-      return photo;
     },
-    [flash, settings, triggerFlashEffect],
+    [flash, settings, triggerFlashEffect, uploadCapture],
   );
 
   // ---- Burst capture: 5 photos in quick succession ----
@@ -269,56 +408,64 @@ export function CameraApp() {
     captureLockRef.current = true;
     setProcessing("Burst capture (5 foto)…");
     const burstId = genId();
-    const items: CaptureItem[] = [];
+    let successCount = 0;
+    let lastInfo: JustCapturedInfo | null = null;
     try {
       for (let i = 0; i < 5; i++) {
         setBurstCount(i + 1);
-        // Capture frame to canvas (no live clip for burst)
-        const { blob: rawBlob, width, height } = await captureFullResolutionPhoto(
-          videoRef.current,
-          streamRef.current,
-        );
-        // Process each frame — but only enqueue, run them sequentially
-        const result = await processToHeic(rawBlob, settings);
-        const previewUrl = result.previewBlob
-          ? URL.createObjectURL(result.previewBlob)
-          : URL.createObjectURL(result.blob);
-        const downloadUrl = URL.createObjectURL(result.blob);
-        const item: CaptureItem = {
-          id: genId(),
-          createdAt: new Date().toISOString(),
-          kind: "burst",
-          previewUrl,
-          downloadUrl,
-          ext: "heic",
-          mime: "image/heic",
-          width: result.width || width,
-          height: result.height || height,
-          size: result.blob.size,
-          filename: `kangwifi-burst-${burstId}-${i + 1}.heic`,
-          burstId,
-          burstCount: i + 1,
-          filter: settings.filter,
-          upscaled: settings.upscale > 1,
-          hdr: settings.hdr,
-        };
-        items.push(item);
-        // Tiny pause to avoid sensor frame duplicates
-        await new Promise((r) => setTimeout(r, 200));
+        setProcessing(`Burst ${i + 1}/5 — proses HEIC + upload…`);
+        try {
+          const { blob: rawBlob, width, height } = await captureFullResolutionPhoto(
+            videoRef.current,
+            streamRef.current,
+          );
+          const result = await processToHeic(rawBlob, settings);
+          const filename = `kangwifi-burst-${burstId}-${i + 1}.heic`;
+          const info = await uploadCapture(
+            result.blob,
+            result.previewBlob,
+            filename,
+            "image/heic",
+            result.width || width,
+            result.height || height,
+            "burst",
+          );
+          if (info) {
+            lastInfo = info;
+            successCount++;
+            // Revoke all but the last preview/download URLs — only show the
+            // last burst photo in the JustCapturedModal to keep memory low.
+            if (i < 4) {
+              const urls = justCapturedUrlsRef.current;
+              if (urls.preview && urls.preview !== urls.download) {
+                URL.revokeObjectURL(urls.preview);
+              }
+              if (urls.download) URL.revokeObjectURL(urls.download);
+              justCapturedUrlsRef.current = {};
+            }
+          }
+          // Tiny pause to avoid sensor frame duplicates
+          await new Promise((r) => setTimeout(r, 150));
+        } catch (e) {
+          console.error(`Burst ${i + 1} failed`, e);
+        }
       }
-      setGallery((g) => [...items.reverse(), ...g]);
-      toast.success("Burst 5 foto disimpan", {
-        description: "Semua sudah di-upscale + HEIC",
-      });
-    } catch (e) {
-      console.error(e);
-      toast.error("Burst gagal");
+      if (lastInfo) {
+        setJustCaptured(lastInfo);
+      }
+      if (successCount > 0) {
+        toast.success(`Burst ${successCount}/5 terupload ke cloud`, {
+          description: "Semua sudah di-upscale + HEIC",
+        });
+      } else {
+        toast.error("Burst gagal total");
+      }
     } finally {
       setBurstCount(0);
       setProcessing(null);
       captureLockRef.current = false;
     }
-  }, [settings]);
+  }, [settings, uploadCapture]);
 
   // ---- Timer countdown then capture ----
   const runWithTimer = useCallback(
@@ -329,10 +476,16 @@ export function CameraApp() {
       }
       let count = settings.timer;
       setTimerCountdown(count);
-      const tick = setInterval(() => {
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+      }
+      timerIntervalRef.current = setInterval(() => {
         count -= 1;
         if (count <= 0) {
-          clearInterval(tick);
+          if (timerIntervalRef.current) {
+            clearInterval(timerIntervalRef.current);
+            timerIntervalRef.current = null;
+          }
           setTimerCountdown(null);
           fn();
         } else {
@@ -362,25 +515,47 @@ export function CameraApp() {
       r.ondataavailable = (e) => {
         if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
       };
-      r.onstop = () => {
+      r.onstop = async () => {
         const blob = new Blob(chunksRef.current, { type: mime });
-        const url = URL.createObjectURL(blob);
-        const item: CaptureItem = {
-          id: genId(),
-          createdAt: new Date().toISOString(),
-          kind: "video",
-          previewUrl: url,
-          downloadUrl: url,
-          ext,
-          mime,
-          size: blob.size,
-          filename: `kangwifi-${Date.now()}.video.${ext}`,
-        };
-        setGallery((g) => [item, ...g]);
         setIsRecording(false);
-        toast.success("Video tersimpan", {
-          description: `${ext.toUpperCase()} · ${(blob.size / 1024 / 1024).toFixed(2)} MB`,
-        });
+        if (blob.size === 0) {
+          toast.error("Video kosong");
+          return;
+        }
+        const filename = `kangwifi-${Date.now()}.video.${ext}`;
+        setProcessing("Mengunggah video ke cloud…");
+        try {
+          const result = await uploadToCloud(blob, filename, mime);
+          if (!result.success || !result.url) {
+            throw new Error(result.error ?? "Upload video gagal");
+          }
+          const previewUrl = URL.createObjectURL(blob);
+          const downloadUrl = previewUrl; // same URL — video previews from blob
+          justCapturedUrlsRef.current = {
+            preview: previewUrl,
+            download: downloadUrl,
+          };
+          setJustCaptured({
+            id: genId(),
+            previewUrl,
+            downloadUrl,
+            filename,
+            mime,
+            size: blob.size,
+            cloudUrl: result.url,
+            cloudKey: result.key,
+            hfUrl: result.hfUrl,
+            kind: "video",
+          });
+          toast.success("Video tersimpan di cloud", {
+            description: `${ext.toUpperCase()} · ${(blob.size / 1024 / 1024).toFixed(2)} MB`,
+          });
+        } catch (e) {
+          console.error(e);
+          toast.error(e instanceof Error ? e.message : "Upload video gagal");
+        } finally {
+          setProcessing(null);
+        }
       };
       r.start(250);
       recorderRef.current = r;
@@ -398,100 +573,17 @@ export function CameraApp() {
       runWithTimer(() => void toggleVideoRecording());
     } else if (mode === "live") {
       runWithTimer(() =>
-        void capturePhoto(true, "live").then((p) => {
-          if (p) {
-            toast.success("Live Photo tersimpan", {
-              description: "Foto HEIC + klip video",
-            });
-          }
-        }),
+        void capturePhoto(true, "live"),
       );
     } else if (mode === "burst") {
       runWithTimer(() => void captureBurst());
     } else if (mode === "portrait") {
-      runWithTimer(() =>
-        void capturePhoto(false, "portrait").then((p) => {
-          if (p) {
-            toast.success("Portrait tersimpan", {
-              description: "HEIC · super HD · jernih",
-            });
-          }
-        }),
-      );
+      runWithTimer(() => void capturePhoto(false, "portrait"));
     } else {
       // photo
-      runWithTimer(() =>
-        void capturePhoto(false).then((p) => {
-          if (p) {
-            toast.success("Foto HEIC tersimpan", {
-              description: `${p.width}×${p.height} · super HD jernih`,
-            });
-          }
-        }),
-      );
+      runWithTimer(() => void capturePhoto(false));
     }
   }, [mode, capturePhoto, captureBurst, toggleVideoRecording, runWithTimer]);
-
-  // ---- Gallery management ----
-  const handleDelete = useCallback((id: string) => {
-    setGallery((g) => {
-      const item = g.find((x) => x.id === id);
-      if (item) {
-        if (item.previewUrl !== item.downloadUrl) {
-          URL.revokeObjectURL(item.previewUrl);
-        }
-        URL.revokeObjectURL(item.downloadUrl);
-        if (item.liveVideoUrl) URL.revokeObjectURL(item.liveVideoUrl);
-      }
-      return g.filter((x) => x.id !== id);
-    });
-  }, []);
-
-  // ---- Update gallery item (e.g. after cloud upload sets cloudUrl) ----
-  const handleItemUpdate = useCallback((updated: CaptureItem) => {
-    setGallery((g) => g.map((it) => (it.id === updated.id ? updated : it)));
-    // Also update the preview if it's the currently open item
-    setPreviewItem((p) => (p && p.id === updated.id ? updated : p));
-  }, []);
-
-  // ---- Fetch cloud file count on mount ----
-  useEffect(() => {
-    let cancelled = false;
-    listCloudImages().then((result) => {
-      if (cancelled) return;
-      if (result.success && result.files) {
-        setCloudCount(result.files.length);
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [cloudGalleryOpen]); // refresh count when cloud gallery closes
-
-  // ---- Open cloud gallery if URL has ?cloud=1 (from PWA shortcut) ----
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const url = new URL(window.location.href);
-    if (url.searchParams.get("cloud") === "1") {
-      setCloudGalleryOpen(true);
-      // Clean the URL so it doesn't reopen on refresh
-      url.searchParams.delete("cloud");
-      window.history.replaceState({}, "", url.toString());
-    }
-  }, []);
-
-  const handleClearAll = useCallback(() => {
-    setGallery((g) => {
-      g.forEach((it) => {
-        if (it.previewUrl !== it.downloadUrl) {
-          URL.revokeObjectURL(it.previewUrl);
-        }
-        URL.revokeObjectURL(it.downloadUrl);
-        if (it.liveVideoUrl) URL.revokeObjectURL(it.liveVideoUrl);
-      });
-      return [];
-    });
-  }, []);
 
   const hdBadge =
     settings.upscale === 1
@@ -603,10 +695,12 @@ export function CameraApp() {
       {/* Bottom controls */}
       <div className="absolute bottom-0 inset-x-0 z-20 pb-[max(env(safe-area-inset-bottom),1.5rem)] px-4 pt-4 bg-gradient-to-t from-black/85 via-black/50 to-transparent">
         <div className="mb-3">
-          <GalleryStrip
-            items={gallery}
-            onOpen={setPreviewItem}
-            onClear={handleClearAll}
+          <CloudStrip
+            files={cloudFiles}
+            loading={cloudLoading}
+            onOpen={(f) => setSelectedCloudFile(f)}
+            onOpenCloud={() => setCloudGalleryOpen(true)}
+            onRefresh={refreshCloud}
           />
         </div>
 
@@ -657,17 +751,165 @@ export function CameraApp() {
         onSettingsChange={setSettings}
       />
 
-      <PreviewModal
-        item={previewItem}
-        onClose={() => setPreviewItem(null)}
-        onDelete={handleDelete}
-        onItemUpdate={handleItemUpdate}
+      <JustCapturedModal
+        info={justCaptured}
+        onClose={closeJustCaptured}
+        onOpenCloud={() => {
+          closeJustCaptured();
+          setCloudGalleryOpen(true);
+        }}
       />
 
       <CloudGallery
         open={cloudGalleryOpen}
         onClose={() => setCloudGalleryOpen(false)}
       />
+
+      {/* Selected cloud file from strip — render CloudFileDetail via CloudGallery's modal */}
+      {selectedCloudFile && (
+        <CloudFileDetailAdapter
+          file={selectedCloudFile}
+          onClose={() => setSelectedCloudFile(null)}
+          onDeleted={() => {
+            setCloudFiles((f) => f.filter((x) => x.key !== selectedCloudFile.key));
+            setCloudCount((c) => Math.max(0, c - 1));
+            setSelectedCloudFile(null);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// CloudFileDetailAdapter — lightweight wrapper that renders a
+// detail modal for a cloud file opened from the strip, with
+// delete + copy link + download. Mirrors the CloudFileDetail
+// inside CloudGallery but as a standalone export-able component.
+// ============================================================
+
+function CloudFileDetailAdapter({
+  file,
+  onClose,
+  onDeleted,
+}: {
+  file: CloudFile;
+  onClose: () => void;
+  onDeleted: () => void;
+}) {
+  const isHeic = /\.heic?$/i.test(file.name) || file.mime === "image/heic";
+  const isVideo = /^video\//i.test(file.mime ?? "") || /\.(webm|mp4|mov)$/i.test(file.name);
+  const [copied, setCopied] = useState(false);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(file.url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!confirm(`Hapus ${file.name} dari cloud?`)) return;
+    const result = await deleteCloudFile(file.key);
+    if (!result.success) {
+      alert(`Gagal hapus: ${result.error}`);
+      return;
+    }
+    onDeleted();
+  };
+
+  return (
+    <div className="fixed inset-0 z-[80] bg-black flex flex-col">
+      <div className="flex items-center justify-between px-4 pt-[max(env(safe-area-inset-top),1rem)] pb-3 bg-gradient-to-b from-black/80 to-transparent">
+        <button
+          onClick={onClose}
+          className="size-10 rounded-full bg-black/50 flex items-center justify-center"
+          aria-label="Close"
+        >
+          <XIcon className="size-5 text-white" />
+        </button>
+        <div className="text-center">
+          <div className="text-xs text-white/80 font-mono truncate max-w-[200px]">
+            {file.name}
+          </div>
+          <div className="text-[10px] text-white/40">
+            {file.sizeHuman} · {new Date(file.createdAt).toLocaleString("id-ID")}
+          </div>
+        </div>
+        <button
+          onClick={handleDelete}
+          className="size-10 rounded-full bg-red-500/20 flex items-center justify-center"
+          aria-label="Delete"
+        >
+          <Trash2Icon className="size-5 text-red-400" />
+        </button>
+      </div>
+
+      <div className="flex-1 flex items-center justify-center px-4">
+        {isVideo ? (
+          <video
+            src={file.url}
+            className="max-w-full max-h-full rounded-lg"
+            controls
+            playsInline
+          />
+        ) : isHeic ? (
+          <div className="text-center space-y-3">
+            <div className="size-24 mx-auto rounded-2xl bg-zinc-900 flex items-center justify-center">
+              <ApertureIcon className="size-10 text-amber-300" />
+            </div>
+            <p className="text-sm text-white/70">
+              File HEIC tidak bisa dipratinjau di browser.
+            </p>
+            <p className="text-xs text-white/50">
+              Unduh untuk melihat di galeri Android.
+            </p>
+          </div>
+        ) : (
+          <img
+            src={file.url}
+            alt={file.name}
+            className="max-w-full max-h-full object-contain rounded-lg"
+          />
+        )}
+      </div>
+
+      <div className="px-4 py-3 bg-zinc-950/80 border-t border-zinc-800 space-y-2">
+        <div className="flex items-center gap-1.5">
+          <input
+            readOnly
+            value={file.url}
+            className="flex-1 px-2.5 py-1.5 bg-black/40 rounded-lg text-[11px] text-white/90 font-mono border border-zinc-700"
+          />
+          <button
+            onClick={copy}
+            className="size-8 rounded-lg bg-sky-500/20 text-sky-300 flex items-center justify-center"
+            aria-label="Copy link"
+          >
+            {copied ? <CheckIcon className="size-4" /> : <Link2Icon className="size-4" />}
+          </button>
+          <a
+            href={file.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="size-8 rounded-lg bg-sky-500/20 text-sky-300 flex items-center justify-center"
+            aria-label="Open in new tab"
+          >
+            <ExternalLinkIcon className="size-4" />
+          </a>
+          <a
+            href={file.url}
+            download={file.name}
+            className="size-8 rounded-lg bg-amber-300/20 text-amber-300 flex items-center justify-center"
+            aria-label="Download"
+          >
+            <DownloadIcon className="size-4" />
+          </a>
+        </div>
+      </div>
     </div>
   );
 }
