@@ -1,0 +1,19 @@
+{
+  "name": "HEIC Cam Pro",
+  "short_name": "HEIC Cam",
+  "description": "Kamera Android super HD dengan output HEIC, upscaling AI, foto, video, dan live photo.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "categories": ["photography", "utilities"],
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
