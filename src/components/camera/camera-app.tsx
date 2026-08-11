@@ -8,6 +8,7 @@ import {
   CaptureItem,
   FacingMode,
   FlashMode,
+  DEFAULT_SETTINGS,
 } from "./types";
 import {
   captureFullResolutionPhoto,
@@ -25,29 +26,16 @@ import {
   TopBar,
 } from "./controls";
 import { GalleryStrip, PreviewModal } from "./gallery";
-
-const DEFAULT_SETTINGS: CameraSettings = {
-  upscale: 2,
-  quality: 95,
-  sharpen: true,
-  enhance: true,
-};
-
-interface PreRecordingChunk {
-  blob: Blob;
-  timestamp: number;
-}
+import { cn } from "@/lib/utils";
 
 export function CameraApp() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
-  const liveVideoChunksRef = useRef<Blob[]>([]);
-  const livePhotoTriggeredRef = useRef(false);
-  const preBufferRef = useRef<PreRecordingChunk[]>([]);
   const flashFrameRef = useRef<HTMLDivElement>(null);
   const captureLockRef = useRef(false);
+  const deviceOrientationRef = useRef<number>(0);
 
   const [facing, setFacing] = useState<FacingMode>("environment");
   const [mode, setMode] = useState<CameraMode>("photo");
@@ -61,60 +49,91 @@ export function CameraApp() {
   const [previewItem, setPreviewItem] = useState<CaptureItem | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState<CameraSettings>(DEFAULT_SETTINGS);
+  const [timerCountdown, setTimerCountdown] = useState<number | null>(null);
+  const [burstCount, setBurstCount] = useState<number>(0);
+  const [orientation, setOrientation] = useState(0);
 
   // ---- Camera start / stop ----
-  const startCamera = useCallback(async (facingMode: FacingMode) => {
-    setError(null);
-    try {
-      // Stop any prior stream
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
-        streamRef.current = null;
+  const startCamera = useCallback(
+    async (facingMode: FacingMode, zoom: number) => {
+      setError(null);
+      try {
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach((t) => t.stop());
+          streamRef.current = null;
+        }
+        const constraints = getIdealStreamConstraints(facingMode, zoom);
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play().catch(() => {});
+        }
+        setStreaming(true);
+        applyTorch(stream, flash === "on" || flash === "torch");
+      } catch (e) {
+        console.error(e);
+        const err = e as Error;
+        if (err.name === "NotAllowedError" || err.name === "SecurityError") {
+          setError("Izinkan akses kamera di pengaturan browser, lalu coba lagi.");
+        } else if (err.name === "NotFoundError") {
+          setError("Tidak ada kamera yang terdeteksi pada perangkat ini.");
+        } else {
+          setError(err.message || "Gagal membuka kamera.");
+        }
+        setStreaming(false);
       }
-      const constraints = getIdealStreamConstraints(facingMode);
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play().catch(() => {});
-      }
-      setStreaming(true);
+    },
+    [flash],
+  );
 
-      // Try to apply torch if available (for "flash on" mode)
-      applyTorch(stream, flash === "on");
-    } catch (e) {
-      console.error(e);
-      const err = e as Error;
-      if (err.name === "NotAllowedError" || err.name === "SecurityError") {
-        setError("Izinkan akses kamera di pengaturan browser, lalu coba lagi.");
-      } else if (err.name === "NotFoundError") {
-        setError("Tidak ada kamera yang terdeteksi pada perangkat ini.");
-      } else {
-        setError(err.message || "Gagal membuka kamera.");
-      }
-      setStreaming(false);
-    }
-  }, [flash]);
-
+  // Restart camera when facing changes
   useEffect(() => {
-    startCamera(facing);
+    startCamera(facing, settings.zoom);
     return () => {
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
       }
     };
-     
   }, [facing]);
 
-  // Apply torch when flash mode changes
+  // Restart camera when zoom changes
   useEffect(() => {
     if (streamRef.current) {
-      applyTorch(streamRef.current, flash === "on");
+      const track = streamRef.current.getVideoTracks()[0];
+      if (track) {
+        try {
+          track.applyConstraints({
+            advanced: [{ zoom: settings.zoom } as MediaTrackConstraintSet],
+          } as MediaTrackConstraints);
+        } catch {
+          // Zoom via constraints not supported — fallback to CSS transform
+        }
+      }
+    }
+  }, [settings.zoom]);
+
+  // Torch toggle when flash changes
+  useEffect(() => {
+    if (streamRef.current) {
+      applyTorch(streamRef.current, flash === "on" || flash === "torch");
     }
   }, [flash]);
 
-  // ---- Recording timer ----
+  // Device orientation for level indicator
+  useEffect(() => {
+    if (!settings.level) return;
+    const handler = (e: DeviceOrientationEvent) => {
+      const gamma = e.gamma ?? 0;
+      deviceOrientationRef.current = gamma;
+      setOrientation(gamma);
+    };
+    window.addEventListener("deviceorientation", handler, true);
+    return () => window.removeEventListener("deviceorientation", handler, true);
+  }, [settings.level]);
+
+  // Recording timer
   useEffect(() => {
     if (!isRecording) {
       setRecordingSeconds(0);
@@ -127,7 +146,7 @@ export function CameraApp() {
     return () => clearInterval(t);
   }, [isRecording]);
 
-  // ---- Flash effect (visual) ----
+  // ---- Flash effect ----
   const triggerFlashEffect = useCallback(() => {
     const el = flashFrameRef.current;
     if (!el) return;
@@ -144,26 +163,27 @@ export function CameraApp() {
     }, 360);
   }, []);
 
-  // ---- PHOTO capture ----
+  // ---- Photo capture (single, with optional live clip) ----
   const capturePhoto = useCallback(
-    async (alsoCaptureVideoClip = false): Promise<{
-      photo: CaptureItem | null;
-      videoClip: Blob | null;
-    }> => {
+    async (
+      alsoCaptureVideoClip = false,
+      kindOverride?: CameraMode,
+    ): Promise<CaptureItem | null> => {
       if (!videoRef.current || !streamRef.current) {
         toast.error("Kamera belum siap");
-        return { photo: null, videoClip: null };
+        return null;
       }
-      if (captureLockRef.current) return { photo: null, videoClip: null };
+      if (captureLockRef.current) return null;
       captureLockRef.current = true;
 
-      // Visual flash effect
-      const shouldFlash = flash === "on" || (flash === "auto" && Math.random() > 0.5);
+      const shouldFlash =
+        flash === "on" ||
+        flash === "torch" ||
+        (flash === "auto" && Math.random() > 0.5);
       if (shouldFlash) triggerFlashEffect();
 
-      setProcessing("Memproses HEIC super HD…");
+      setProcessing("Memproses HEIC super HD jernih…");
 
-      // For Live Photo: also start a short video recording in parallel
       let clipBlob: Blob | null = null;
       let clipRecorder: MediaRecorder | null = null;
       let clipChunks: Blob[] = [];
@@ -180,16 +200,11 @@ export function CameraApp() {
             if (e.data && e.data.size > 0) clipChunks.push(e.data);
           };
           const clipDone = new Promise<Blob>((resolve) => {
-            r.onstop = () => {
-              resolve(new Blob(clipChunks, { type: mime }));
-            };
+            r.onstop = () => resolve(new Blob(clipChunks, { type: mime }));
           });
           r.start();
           clipRecorder = r;
-          // Wait for the clip — capture photo at ~1.5s midpoint
           await new Promise((r) => setTimeout(r, 1500));
-          // Photo capture happens below — fire & forget the photo capture
-          // Continue recording for 1.5s more after photo
           await new Promise((r) => setTimeout(r, 1500));
           r.stop();
           clipBlob = await clipDone;
@@ -198,7 +213,6 @@ export function CameraApp() {
         }
       }
 
-      // Capture the photo (full resolution from ImageCapture if available)
       let photo: CaptureItem | null = null;
       try {
         const { blob: rawBlob, width, height } = await captureFullResolutionPhoto(
@@ -209,8 +223,6 @@ export function CameraApp() {
         const finalWidth = result.width || width;
         const finalHeight = result.height || height;
         const heicBlob = result.blob;
-        // Use JPEG preview for in-browser display (browsers can't render HEIC),
-        // and HEIC blob as the downloadable file.
         const previewUrl = result.previewBlob
           ? URL.createObjectURL(result.previewBlob)
           : URL.createObjectURL(heicBlob);
@@ -219,7 +231,7 @@ export function CameraApp() {
         photo = {
           id: genId(),
           createdAt: new Date().toISOString(),
-          kind: alsoCaptureVideoClip ? "live" : "photo",
+          kind: kindOverride ?? (alsoCaptureVideoClip ? "live" : "photo"),
           previewUrl,
           downloadUrl,
           liveVideoUrl: clipUrl,
@@ -228,7 +240,10 @@ export function CameraApp() {
           width: finalWidth,
           height: finalHeight,
           size: heicBlob.size,
-          filename: `heic-cam-${Date.now()}.${alsoCaptureVideoClip ? "live" : "photo"}.heic`,
+          filename: `kangwifi-${Date.now()}.${kindOverride ?? (alsoCaptureVideoClip ? "live" : "photo")}.heic`,
+          filter: settings.filter,
+          upscaled: settings.upscale > 1,
+          hdr: settings.hdr,
         };
         setGallery((g) => [photo!, ...g]);
       } catch (e) {
@@ -240,23 +255,99 @@ export function CameraApp() {
         captureLockRef.current = false;
       }
 
-      return { photo, videoClip: clipBlob };
+      return photo;
     },
     [flash, settings, triggerFlashEffect],
   );
 
-  // ---- VIDEO recording ----
+  // ---- Burst capture: 5 photos in quick succession ----
+  const captureBurst = useCallback(async () => {
+    if (!videoRef.current || !streamRef.current || captureLockRef.current) return;
+    captureLockRef.current = true;
+    setProcessing("Burst capture (5 foto)…");
+    const burstId = genId();
+    const items: CaptureItem[] = [];
+    try {
+      for (let i = 0; i < 5; i++) {
+        setBurstCount(i + 1);
+        // Capture frame to canvas (no live clip for burst)
+        const { blob: rawBlob, width, height } = await captureFullResolutionPhoto(
+          videoRef.current,
+          streamRef.current,
+        );
+        // Process each frame — but only enqueue, run them sequentially
+        const result = await processToHeic(rawBlob, settings);
+        const previewUrl = result.previewBlob
+          ? URL.createObjectURL(result.previewBlob)
+          : URL.createObjectURL(result.blob);
+        const downloadUrl = URL.createObjectURL(result.blob);
+        const item: CaptureItem = {
+          id: genId(),
+          createdAt: new Date().toISOString(),
+          kind: "burst",
+          previewUrl,
+          downloadUrl,
+          ext: "heic",
+          mime: "image/heic",
+          width: result.width || width,
+          height: result.height || height,
+          size: result.blob.size,
+          filename: `kangwifi-burst-${burstId}-${i + 1}.heic`,
+          burstId,
+          burstCount: i + 1,
+          filter: settings.filter,
+          upscaled: settings.upscale > 1,
+          hdr: settings.hdr,
+        };
+        items.push(item);
+        // Tiny pause to avoid sensor frame duplicates
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      setGallery((g) => [...items.reverse(), ...g]);
+      toast.success("Burst 5 foto disimpan", {
+        description: "Semua sudah di-upscale + HEIC",
+      });
+    } catch (e) {
+      console.error(e);
+      toast.error("Burst gagal");
+    } finally {
+      setBurstCount(0);
+      setProcessing(null);
+      captureLockRef.current = false;
+    }
+  }, [settings]);
+
+  // ---- Timer countdown then capture ----
+  const runWithTimer = useCallback(
+    (fn: () => void) => {
+      if (settings.timer === 0) {
+        fn();
+        return;
+      }
+      let count = settings.timer;
+      setTimerCountdown(count);
+      const tick = setInterval(() => {
+        count -= 1;
+        if (count <= 0) {
+          clearInterval(tick);
+          setTimerCountdown(null);
+          fn();
+        } else {
+          setTimerCountdown(count);
+        }
+      }, 1000);
+    },
+    [settings.timer],
+  );
+
+  // ---- Video recording ----
   const toggleVideoRecording = useCallback(async () => {
     if (!streamRef.current) return;
     if (isRecording) {
-      // stop
       const r = recorderRef.current;
-      if (r && r.state !== "inactive") {
-        r.stop();
-      }
+      if (r && r.state !== "inactive") r.stop();
       return;
     }
-    // start
     try {
       chunksRef.current = [];
       const { mime, ext } = pickRecorderMime();
@@ -280,7 +371,7 @@ export function CameraApp() {
           ext,
           mime,
           size: blob.size,
-          filename: `heic-cam-${Date.now()}.video.${ext}`,
+          filename: `kangwifi-${Date.now()}.video.${ext}`,
         };
         setGallery((g) => [item, ...g]);
         setIsRecording(false);
@@ -301,25 +392,42 @@ export function CameraApp() {
   // ---- Main capture dispatcher ----
   const handleCapture = useCallback(() => {
     if (mode === "video") {
-      void toggleVideoRecording();
+      runWithTimer(() => void toggleVideoRecording());
     } else if (mode === "live") {
-      void capturePhoto(true).then(({ photo }) => {
-        if (photo) {
-          toast.success("Live Photo tersimpan", {
-            description: "Foto HEIC + klip video pendek",
-          });
-        }
-      });
+      runWithTimer(() =>
+        void capturePhoto(true, "live").then((p) => {
+          if (p) {
+            toast.success("Live Photo tersimpan", {
+              description: "Foto HEIC + klip video",
+            });
+          }
+        }),
+      );
+    } else if (mode === "burst") {
+      runWithTimer(() => void captureBurst());
+    } else if (mode === "portrait") {
+      runWithTimer(() =>
+        void capturePhoto(false, "portrait").then((p) => {
+          if (p) {
+            toast.success("Portrait tersimpan", {
+              description: "HEIC · super HD · jernih",
+            });
+          }
+        }),
+      );
     } else {
-      void capturePhoto(false).then(({ photo }) => {
-        if (photo) {
-          toast.success("Foto HEIC tersimpan", {
-            description: `${photo.width}×${photo.height} · super HD`,
-          });
-        }
-      });
+      // photo
+      runWithTimer(() =>
+        void capturePhoto(false).then((p) => {
+          if (p) {
+            toast.success("Foto HEIC tersimpan", {
+              description: `${p.width}×${p.height} · super HD jernih`,
+            });
+          }
+        }),
+      );
     }
-  }, [mode, capturePhoto, toggleVideoRecording]);
+  }, [mode, capturePhoto, captureBurst, toggleVideoRecording, runWithTimer]);
 
   // ---- Gallery management ----
   const handleDelete = useCallback((id: string) => {
@@ -356,37 +464,87 @@ export function CameraApp() {
         ? "2× SUPER HD"
         : "4× ULTRA HD";
 
+  // CSS-based zoom (fallback when MediaTrackConstraint zoom not supported)
+  const cssZoom = settings.zoom > 1 ? settings.zoom : 1;
+
+  const videoProps = cnVideo(facing, cssZoom);
+
   return (
     <div className="fixed inset-0 bg-black text-white select-none">
       {/* Viewfinder */}
-      <video
-        ref={videoRef}
-        playsInline
-        muted
-        autoPlay
-        className={cnVideo(facing)}
-      />
+      <div className="absolute inset-0 z-0 overflow-hidden">
+        <video
+          ref={videoRef}
+          playsInline
+          muted
+          autoPlay
+          className={videoProps.className}
+          style={videoProps.style}
+        />
+        {/* Aspect ratio crop overlay */}
+        <AspectRatioOverlay aspect={settings.aspect} />
+      </div>
 
-      {/* Flash overlay (visual effect on capture) */}
+      {/* Flash overlay */}
       <div
         ref={flashFrameRef}
         className="absolute inset-0 bg-white pointer-events-none z-30"
         style={{ opacity: 0 }}
       />
 
-      {/* Rule-of-thirds grid (subtle) */}
-      <div className="absolute inset-0 z-10 pointer-events-none opacity-20">
-        <div className="absolute inset-y-0 left-1/3 w-px bg-white" />
-        <div className="absolute inset-y-0 left-2/3 w-px bg-white" />
-        <div className="absolute inset-x-0 top-1/3 h-px bg-white" />
-        <div className="absolute inset-x-0 top-2/3 h-px bg-white" />
-      </div>
+      {/* Grid overlay */}
+      {settings.grid && (
+        <div className="absolute inset-0 z-10 pointer-events-none">
+          <div className="absolute inset-y-0 left-1/3 w-px bg-white/30" />
+          <div className="absolute inset-y-0 left-2/3 w-px bg-white/30" />
+          <div className="absolute inset-x-0 top-1/3 h-px bg-white/30" />
+          <div className="absolute inset-x-0 top-2/3 h-px bg-white/30" />
+          {/* Center crosshair */}
+          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 size-12 border border-amber-300/50 rounded-full" />
+        </div>
+      )}
+
+      {/* Level indicator */}
+      {settings.level && (
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-10 pointer-events-none">
+          <div
+            className="w-32 h-px bg-amber-300/80"
+            style={{
+              transform: `rotate(${orientation}deg)`,
+              transformOrigin: "center",
+            }}
+          />
+        </div>
+      )}
+
+      {/* Filter preview badge */}
+      {settings.filter !== "none" && (
+        <div className="absolute top-20 right-4 z-20 px-2.5 py-1 rounded-full bg-black/50 backdrop-blur-md">
+          <span className="text-[10px] font-bold text-amber-300 uppercase tracking-wider">
+            {settings.filter}
+          </span>
+        </div>
+      )}
+
+      {/* Timer countdown overlay */}
+      {typeof timerCountdown === "number" && timerCountdown > 0 && (
+        <div className="absolute inset-0 z-40 flex items-center justify-center pointer-events-none">
+          <span
+            className="text-9xl font-black text-amber-300 animate-ping-slow"
+            style={{ textShadow: "0 0 30px rgba(252, 211, 77, 0.6)" }}
+          >
+            {timerCountdown}
+          </span>
+        </div>
+      )}
 
       {/* Top bar */}
       <TopBar
         flash={flash}
         onFlashCycle={() =>
-          setFlash((f) => (f === "off" ? "auto" : f === "auto" ? "on" : "off"))
+          setFlash((f) =>
+            f === "off" ? "auto" : f === "auto" ? "on" : f === "on" ? "torch" : "off",
+          )
         }
         facing={facing}
         onSwitchFacing={() =>
@@ -396,9 +554,16 @@ export function CameraApp() {
         hdBadge={hdBadge}
       />
 
+      {/* Zoom quick buttons (above capture) */}
+      <div className="absolute bottom-44 inset-x-0 z-20 flex justify-center gap-2 px-4">
+        <ZoomPill label="1×" active={settings.zoom === 1} onClick={() => setSettings((s) => ({ ...s, zoom: 1 }))} />
+        <ZoomPill label="2×" active={settings.zoom === 2} onClick={() => setSettings((s) => ({ ...s, zoom: 2 }))} />
+        <ZoomPill label="4×" active={settings.zoom === 4} onClick={() => setSettings((s) => ({ ...s, zoom: 4 }))} />
+        <ZoomPill label="8×" active={settings.zoom === 8} onClick={() => setSettings((s) => ({ ...s, zoom: 8 }))} />
+      </div>
+
       {/* Bottom controls */}
-      <div className="absolute bottom-0 inset-x-0 z-20 pb-[max(env(safe-area-inset-bottom),1.5rem)] px-4 pt-4 bg-gradient-to-t from-black/80 via-black/40 to-transparent">
-        {/* Gallery strip */}
+      <div className="absolute bottom-0 inset-x-0 z-20 pb-[max(env(safe-area-inset-bottom),1.5rem)] px-4 pt-4 bg-gradient-to-t from-black/85 via-black/50 to-transparent">
         <div className="mb-3">
           <GalleryStrip
             items={gallery}
@@ -407,21 +572,27 @@ export function CameraApp() {
           />
         </div>
 
-        {/* Mode selector + capture */}
         <div className="flex items-center justify-between gap-4">
-          <div className="flex-1" />
+          <div className="flex-1 flex flex-col items-start">
+            <div className="text-[10px] text-white/40">WATERMARK</div>
+            <div className="text-xs font-bold text-amber-300 truncate max-w-[80px]">
+              {settings.watermark === "none" ? "OFF" : settings.watermarkText}
+            </div>
+          </div>
           <div className="flex flex-col items-center gap-2">
             <CaptureButton
               mode={mode}
               isRecording={isRecording}
               onCapture={handleCapture}
               recordingSeconds={recordingSeconds}
+              timerCountdown={timerCountdown}
+              burstCount={burstCount}
             />
             <div className="h-4" />
           </div>
           <div className="flex-1 flex justify-end">
             <div className="text-right">
-              <div className="text-[10px] text-white/50">Format</div>
+              <div className="text-[10px] text-white/40">FORMAT</div>
               <div className="text-xs font-bold text-amber-300">HEIC</div>
             </div>
           </div>
@@ -435,18 +606,12 @@ export function CameraApp() {
         </div>
       </div>
 
-      {/* Permission gate */}
       {!streaming && error && (
-        <PermissionGate error={error} onRetry={() => startCamera(facing)} />
+        <PermissionGate error={error} onRetry={() => startCamera(facing, settings.zoom)} />
       )}
 
-      {/* Processing overlay */}
-      <ProcessingOverlay
-        visible={!!processing}
-        message={processing ?? ""}
-      />
+      <ProcessingOverlay visible={!!processing} message={processing ?? ""} />
 
-      {/* Settings sheet */}
       <SettingsSheet
         open={settingsOpen}
         onOpenChange={setSettingsOpen}
@@ -454,13 +619,77 @@ export function CameraApp() {
         onSettingsChange={setSettings}
       />
 
-      {/* Preview modal */}
       <PreviewModal
         item={previewItem}
         onClose={() => setPreviewItem(null)}
         onDelete={handleDelete}
       />
     </div>
+  );
+}
+
+function AspectRatioOverlay({ aspect }: { aspect: string }) {
+  if (aspect === "free") return null;
+  // Render a black mask to crop viewfinder to target aspect ratio
+  return (
+    <div className="absolute inset-0 z-[5] pointer-events-none">
+      <AspectMask aspect={aspect} />
+    </div>
+  );
+}
+
+function AspectMask({ aspect }: { aspect: string }) {
+  // Compute the visible window
+  let ratio = 0;
+  switch (aspect) {
+    case "1:1": ratio = 1; break;
+    case "4:3": ratio = 4 / 3; break;
+    case "16:9": ratio = 16 / 9; break;
+    case "3:4": ratio = 3 / 4; break;
+    default: return null;
+  }
+  // Use CSS to compute via aspect-ratio property
+  return (
+    <div className="absolute inset-0 flex items-center justify-center">
+      <div
+        className="relative"
+        style={{
+          width: "100%",
+          height: "100%",
+          maxWidth: ratio >= 1 ? "100%" : `${(ratio / 1) * 100}%`,
+          maxHeight: ratio >= 1 ? `${(1 / ratio) * 100}%` : "100%",
+          aspectRatio: aspect.replace(":", " / "),
+        }}
+      >
+        {/* Black borders around the visible window */}
+        <div className="absolute -top-[100vh] left-0 right-0 h-[100vh] bg-black/60" />
+        <div className="absolute -bottom-[100vh] left-0 right-0 h-[100vh] bg-black/60" />
+        <div className="absolute top-0 bottom-0 -left-[100vw] w-[100vw] bg-black/60" />
+        <div className="absolute top-0 bottom-0 -right-[100vw] w-[100vw] bg-black/60" />
+      </div>
+    </div>
+  );
+}
+
+function ZoomPill({
+  label,
+  active,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        "px-2.5 py-1 rounded-full text-[11px] font-bold backdrop-blur-md transition-colors",
+        active ? "bg-amber-300 text-black" : "bg-black/40 text-white/70",
+      )}
+    >
+      {label}
+    </button>
   );
 }
 
@@ -477,13 +706,20 @@ function applyTorch(stream: MediaStream, on: boolean) {
       } as MediaTrackConstraints);
     }
   } catch {
-    // torch not supported — visual flash only
+    // torch not supported
   }
 }
 
-/** Mirrors the preview when using the front camera so it behaves like a selfie cam. */
-function cnVideo(facing: FacingMode): string {
+function cnVideo(facing: FacingMode, zoom: number): { className: string; style: React.CSSProperties } {
   const base =
-    "absolute inset-0 w-full h-full object-cover z-0 bg-black transition-transform";
-  return facing === "user" ? `${base} scale-x-[-1]` : base;
+    "absolute inset-0 w-full h-full object-cover bg-black transition-transform duration-200";
+  const scaleX = facing === "user" ? -1 : 1;
+  const scale = zoom > 1 ? zoom : 1;
+  return {
+    className: base,
+    style: {
+      transform: `scaleX(${scaleX}) scale(${scale})`,
+      transformOrigin: "center center",
+    },
+  };
 }

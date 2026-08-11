@@ -14,6 +14,11 @@ import {
   Camera,
   Video,
   CircleDot,
+  Layers,
+  Aperture,
+  Info,
+  Sun,
+  Crop,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -33,6 +38,9 @@ export function GalleryStrip({ items, onOpen, onClear }: GalleryStripProps) {
   }
   return (
     <div className="flex items-center gap-2 overflow-x-auto no-scrollbar h-12">
+      <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-300/15 text-[10px] text-amber-300 font-bold flex-shrink-0">
+        {items.length}
+      </div>
       {items.map((it) => (
         <button
           key={it.id}
@@ -44,8 +52,6 @@ export function GalleryStrip({ items, onOpen, onClear }: GalleryStripProps) {
               <Play className="size-4 text-white fill-white" />
             </div>
           ) : (
-            // For HEIC: <img> may not render on all browsers; try anyway.
-            // Fall back to an icon if it errors.
             <ThumbPreview item={it} />
           )}
           {it.kind === "live" && (
@@ -53,9 +59,19 @@ export function GalleryStrip({ items, onOpen, onClear }: GalleryStripProps) {
               LIVE
             </span>
           )}
+          {it.kind === "burst" && (
+            <span className="absolute top-0.5 right-0.5 px-1 rounded bg-sky-300 text-[8px] font-bold text-black">
+              B×{it.burstCount ?? 5}
+            </span>
+          )}
           {it.kind === "video" && (
             <span className="absolute bottom-0.5 left-0.5 px-1 rounded bg-black/60 text-[8px] font-bold text-white">
               VID
+            </span>
+          )}
+          {it.upscaled && (
+            <span className="absolute bottom-0.5 right-0.5 px-0.5 rounded bg-emerald-500/80 text-[7px] font-bold text-white">
+              HD
             </span>
           )}
         </button>
@@ -97,6 +113,7 @@ interface PreviewModalProps {
 }
 
 export function PreviewModal({ item, onClose, onDelete }: PreviewModalProps) {
+  const [showInfo, setShowInfo] = useState(false);
   if (!item) return null;
 
   const handleDownload = () => {
@@ -116,13 +133,13 @@ export function PreviewModal({ item, onClose, onDelete }: PreviewModalProps) {
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
         await navigator.share({
           files: [file],
-          title: "HEIC Cam Pro",
+          title: "kangwifi cam",
         });
       } else {
         handleDownload();
       }
     } catch {
-      // user cancelled or share failed
+      // user cancelled
     }
   };
 
@@ -148,14 +165,14 @@ export function PreviewModal({ item, onClose, onDelete }: PreviewModalProps) {
           </div>
         </div>
         <button
-          onClick={() => {
-            onDelete(item.id);
-            onClose();
-          }}
-          className="size-10 rounded-full bg-black/50 backdrop-blur-md flex items-center justify-center"
-          aria-label="Delete"
+          onClick={() => setShowInfo((s) => !s)}
+          className={cn(
+            "size-10 rounded-full backdrop-blur-md flex items-center justify-center",
+            showInfo ? "bg-amber-300 text-black" : "bg-black/50 text-white",
+          )}
+          aria-label="Info"
         >
-          <Trash2 className="size-5 text-red-400" />
+          <Info className="size-5" />
         </button>
       </div>
 
@@ -163,6 +180,13 @@ export function PreviewModal({ item, onClose, onDelete }: PreviewModalProps) {
       <div className="flex-1 flex items-center justify-center px-4 relative">
         <PreviewContent item={item} />
       </div>
+
+      {/* Info panel */}
+      {showInfo && (
+        <div className="px-4 py-3 bg-zinc-950/80 backdrop-blur-md border-t border-zinc-800">
+          <InfoPanel item={item} />
+        </div>
+      )}
 
       {/* Bottom actions */}
       <div className="px-6 pt-4 pb-[max(env(safe-area-inset-bottom),2rem)] bg-gradient-to-t from-black/80 to-transparent">
@@ -204,7 +228,6 @@ function PreviewContent({ item }: { item: CaptureItem }) {
   if (item.kind === "live") {
     return <LivePhotoPreview item={item} />;
   }
-  // Photo
   return <PhotoPreview item={item} />;
 }
 
@@ -216,9 +239,7 @@ function PhotoPreview({ item }: { item: CaptureItem }) {
         <div className="size-24 mx-auto rounded-2xl bg-zinc-900 flex items-center justify-center">
           <Camera className="size-10 text-amber-300" />
         </div>
-        <p className="text-sm text-white/70">
-          Pratinjau tidak dapat dimuat.
-        </p>
+        <p className="text-sm text-white/70">Pratinjau tidak dapat dimuat.</p>
         <p className="text-xs text-white/50">
           Tetap unduh file — file HEIC asli akan tampil sempurna di galeri
           Android.
@@ -262,4 +283,52 @@ function LivePhotoPreview({ item }: { item: CaptureItem }) {
       </button>
     </div>
   );
+}
+
+function InfoPanel({ item }: { item: CaptureItem }) {
+  const rows: { label: string; value: string }[] = [
+    { label: "Tipe", value: kindLabel(item.kind) },
+    { label: "Format", value: item.ext.toUpperCase() },
+    {
+      label: "Dimensi",
+      value:
+        item.width && item.height
+          ? `${item.width} × ${item.height} px`
+          : "—",
+    },
+    { label: "Ukuran File", value: formatBytes(item.size) },
+    { label: "Dibuat", value: new Date(item.createdAt).toLocaleString("id-ID") },
+    { label: "Filter", value: item.filter ? item.filter.toUpperCase() : "NONE" },
+    {
+      label: "Upscaled",
+      value: item.upscaled ? "YA" : "TIDAK",
+    },
+    { label: "HDR", value: item.hdr ? "YA" : "TIDAK" },
+  ];
+  if (item.burstCount) {
+    rows.push({ label: "Burst Count", value: String(item.burstCount) });
+  }
+  return (
+    <div className="grid grid-cols-2 gap-x-4 gap-y-2 max-w-md mx-auto">
+      {rows.map((r) => (
+        <div key={r.label} className="flex items-center justify-between gap-2">
+          <span className="text-[11px] text-white/50">{r.label}</span>
+          <span className="text-xs font-bold text-white text-right">
+            {r.value}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function kindLabel(k: CaptureItem["kind"]): string {
+  switch (k) {
+    case "photo": return "Foto";
+    case "video": return "Video";
+    case "live": return "Live Photo";
+    case "burst": return "Burst";
+    case "portrait": return "Portrait";
+    default: return k;
+  }
 }

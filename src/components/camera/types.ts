@@ -1,10 +1,49 @@
-export type CameraMode = "photo" | "video" | "live";
+export type CameraMode = "photo" | "video" | "live" | "burst" | "portrait";
 
 export type FacingMode = "environment" | "user";
 
-export type FlashMode = "auto" | "on" | "off";
+export type FlashMode = "auto" | "on" | "off" | "torch";
 
 export type UpscaleFactor = 1 | 2 | 4;
+
+export type FilterPreset =
+  | "none"
+  | "vivid"
+  | "mono"
+  | "warm"
+  | "cool"
+  | "cinema"
+  | "night"
+  | "vintage";
+
+export type AspectRatio = "free" | "1:1" | "4:3" | "16:9" | "3:4";
+
+export type WatermarkPosition = "bl" | "br" | "tl" | "tr" | "c" | "none";
+
+export type TimerDuration = 0 | 3 | 5 | 10;
+
+export interface CameraSettings {
+  upscale: UpscaleFactor;
+  quality: number;
+  sharpen: boolean;
+  denoise: boolean;
+  enhance: boolean;
+  filter: FilterPreset;
+  aspect: AspectRatio;
+  watermark: WatermarkPosition;
+  watermarkText: string;
+  watermarkOpacity: number;
+  vignette: boolean;
+  hdr: boolean;
+  grid: boolean;
+  level: boolean;
+  timer: TimerDuration;
+  zoom: number; // 1.0 - 8.0
+  exposure: number; // -1 .. 1
+  contrast: number; // -1 .. 1
+  saturation: number; // -1 .. 1
+  temperature: number; // -1 .. 1
+}
 
 export interface CaptureItem {
   id: string;
@@ -19,11 +58,33 @@ export interface CaptureItem {
   height?: number;
   size: number;
   filename: string;
+  filter?: FilterPreset;
+  upscaled?: boolean;
+  hdr?: boolean;
+  burstCount?: number;
+  burstId?: string;
+  selected?: boolean;
 }
 
-export interface CameraSettings {
-  upscale: UpscaleFactor;
-  quality: number;
-  sharpen: boolean;
-  enhance: boolean;
-}
+export const DEFAULT_SETTINGS: CameraSettings = {
+  upscale: 2,
+  quality: 95,
+  sharpen: true,
+  denoise: true,
+  enhance: true,
+  filter: "none",
+  aspect: "free",
+  watermark: "br",
+  watermarkText: "kangwifi cam",
+  watermarkOpacity: 0.85,
+  vignette: false,
+  hdr: false,
+  grid: true,
+  level: false,
+  timer: 0,
+  zoom: 1,
+  exposure: 0,
+  contrast: 0,
+  saturation: 0,
+  temperature: 0,
+};
