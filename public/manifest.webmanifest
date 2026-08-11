@@ -1,19 +1,59 @@
 {
-  "name": "HEIC Cam Pro",
-  "short_name": "HEIC Cam",
-  "description": "Kamera Android super HD dengan output HEIC, upscaling AI, foto, video, dan live photo.",
+  "name": "Kangwifi Cam — Super HD HEIC Camera",
+  "short_name": "Kangwifi Cam",
+  "description": "Kamera Android super HD dengan output HEIC, upscaling AI, foto/video/live photo, dan upload otomatis ke cloud kangwifi.",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
+  "display_override": ["standalone", "fullscreen"],
   "orientation": "portrait",
   "background_color": "#000000",
   "theme_color": "#000000",
-  "categories": ["photography", "utilities"],
+  "lang": "id",
+  "dir": "ltr",
+  "categories": ["photography", "utilities", "productivity"],
+  "prefer_related_applications": false,
   "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-192-maskable.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icon-512-maskable.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
     {
       "src": "/icon.svg",
       "sizes": "any",
       "type": "image/svg+xml",
-      "purpose": "any maskable"
+      "purpose": "any"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Buka Cloud Gallery",
+      "short_name": "Cloud",
+      "description": "Lihat semua foto yang sudah di-upload ke cloud kangwifi",
+      "url": "/?cloud=1",
+      "icons": [
+        { "src": "/icon-192.png", "sizes": "192x192" }
+      ]
     }
   ]
 }

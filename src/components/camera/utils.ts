@@ -1,4 +1,4 @@
-import type { CameraSettings } from "@/components/camera/types";
+import type { CameraSettings, CloudFile } from "@/components/camera/types";
 
 /**
  * Pick the best constraints for getUserMedia — prefer the highest resolution
@@ -191,3 +191,108 @@ export function isTouchDevice(): boolean {
   if (typeof window === "undefined") return false;
   return "ontouchstart" in window || navigator.maxTouchPoints > 0;
 }
+
+// ============================================================
+// CLOUD — upload / list / delete via our /api/cloud-* proxies
+// ============================================================
+
+const CLOUD_PAGE_URL = "https://cloud.kangwifi.eu.org/";
+
+/**
+ * Upload a Blob (HEIC photo, MP4 video, etc.) to the kangwifi cloud.
+ * Returns the public URL the file can be accessed from.
+ */
+export async function uploadToCloud(
+  blob: Blob,
+  filename: string,
+  mime: string,
+): Promise<{
+  success: boolean;
+  url?: string;
+  key?: string;
+  name?: string;
+  size?: number;
+  sizeHuman?: string;
+  hfUrl?: string | null;
+  cloudPage?: string;
+  error?: string;
+}> {
+  const fd = new FormData();
+  // Rename file to start with "kangwifi-" so we can filter later
+  const cloudName = filename.startsWith("kangwifi-")
+    ? filename
+    : `kangwifi-${Date.now()}-${filename}`;
+  const file = new File([blob], cloudName, { type: mime });
+  fd.append("file", file);
+
+  const res = await fetch("/api/cloud-upload", {
+    method: "POST",
+    body: fd,
+  });
+  const data = await res.json();
+  if (!res.ok || !data.success) {
+    return { success: false, error: data.error ?? `HTTP ${res.status}` };
+  }
+  return {
+    success: true,
+    url: data.url,
+    key: data.key,
+    name: data.name,
+    size: data.size,
+    sizeHuman: data.sizeHuman,
+    hfUrl: data.hfUrl,
+    cloudPage: data.cloudPage ?? CLOUD_PAGE_URL,
+  };
+}
+
+/**
+ * List image files from the cloud. By default only files starting with
+ * "kangwifi-" prefix are returned (so we don't show unrelated files).
+ */
+export async function listCloudImages(
+  prefix: string = "kangwifi-",
+): Promise<{ success: boolean; files?: CloudFile[]; error?: string }> {
+  const url = `/api/cloud-list?prefix=${encodeURIComponent(prefix)}&images=1`;
+  const res = await fetch(url, { cache: "no-store" });
+  const data = await res.json();
+  if (!res.ok || !data.success) {
+    return { success: false, error: data.error ?? `HTTP ${res.status}` };
+  }
+  // Map to our CloudFile type
+  const files: CloudFile[] = (data.files ?? []).map(
+    (f: Record<string, unknown>) => ({
+      id: String(f.id ?? f.key ?? ""),
+      name: String(f.name ?? ""),
+      key: String(f.key ?? ""),
+      size: Number(f.size ?? 0),
+      sizeHuman: String(f.size_human ?? ""),
+      mime: f.mime ? String(f.mime) : undefined,
+      status: (f.status === "cloud" ? "cloud" : "local") as "local" | "cloud",
+      isPublic: Boolean(f.is_public ?? true),
+      url: String(f.url ?? `https://cloud.kangwifi.eu.org/file/${encodeURIComponent(String(f.key))}`),
+      hfUrl: f.hf_url ? String(f.hf_url) : null,
+      createdAt: Number(f.created_at ?? Date.now()),
+    }),
+  );
+  // Newest first
+  files.sort((a, b) => b.createdAt - a.createdAt);
+  return { success: true, files };
+}
+
+/**
+ * Delete a file from the cloud by its key.
+ */
+export async function deleteCloudFile(
+  key: string,
+): Promise<{ success: boolean; error?: string }> {
+  const res = await fetch(`/api/cloud-delete?key=${encodeURIComponent(key)}`, {
+    method: "DELETE",
+  });
+  const data = await res.json();
+  if (!res.ok || !data.success) {
+    return { success: false, error: data.error ?? `HTTP ${res.status}` };
+  }
+  return { success: true };
+}
+
+export const CLOUD_URL = CLOUD_PAGE_URL;

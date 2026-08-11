@@ -14,9 +14,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "HEIC Cam Pro — Super HD Camera",
+  title: "Kangwifi Cam — Super HD HEIC Camera",
   description:
-    "Aplikasi kamera Android dengan output HEIC, upscaling AI, super HD jernih. Dukung foto, video, dan live photo.",
+    "Aplikasi kamera Android dengan output HEIC, upscaling AI super HD jernih, foto/video/live photo, dan upload ke cloud kangwifi.",
   keywords: [
     "camera",
     "HEIC",
@@ -25,17 +25,31 @@ export const metadata: Metadata = {
     "upscale",
     "live photo",
     "video",
+    "kangwifi",
+    "cloud",
   ],
-  authors: [{ name: "HEIC Cam Pro" }],
+  authors: [{ name: "kangwifi" }],
   manifest: "/manifest.webmanifest",
+  applicationName: "Kangwifi Cam",
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
-    title: "HEIC Cam Pro",
+    title: "Kangwifi Cam",
+  },
+  formatDetection: {
+    telephone: false,
   },
   icons: {
-    icon: "/icon.svg",
-    apple: "/icon.svg",
+    icon: [
+      { url: "/favicon-32.png", sizes: "32x32", type: "image/png" },
+      { url: "/icon-192.png", sizes: "192x192", type: "image/png" },
+      { url: "/icon-512.png", sizes: "512x512", type: "image/png" },
+      { url: "/icon.svg", sizes: "any", type: "image/svg+xml" },
+    ],
+    apple: [
+      { url: "/apple-touch-icon.png", sizes: "180x180", type: "image/png" },
+    ],
+    shortcut: ["/icon-192.png"],
   },
 };
 

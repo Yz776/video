@@ -34,6 +34,7 @@ import {
   Image as ImageIcon,
   Flame,
   Aperture,
+  Cloud as CloudIcon,
 } from "lucide-react";
 import {
   Sheet,
@@ -52,6 +53,8 @@ interface TopBarProps {
   facing: "environment" | "user";
   onSwitchFacing: () => void;
   onOpenSettings: () => void;
+  onOpenCloud?: () => void;
+  cloudCount?: number;
   hdBadge?: string;
 }
 
@@ -61,6 +64,8 @@ export function TopBar({
   facing,
   onSwitchFacing,
   onOpenSettings,
+  onOpenCloud,
+  cloudCount,
   hdBadge,
 }: TopBarProps) {
   return (
@@ -89,6 +94,20 @@ export function TopBar({
             <span className="text-[10px] font-bold text-white/80 bg-black/40 backdrop-blur-md px-1.5 py-0.5 rounded">
               AUTO
             </span>
+          )}
+          {onOpenCloud && (
+            <button
+              onClick={onOpenCloud}
+              className="relative size-11 rounded-full bg-black/40 backdrop-blur-md flex items-center justify-center active:scale-95 transition-transform"
+              aria-label="Cloud gallery"
+            >
+              <CloudIcon className="size-5 text-sky-400" />
+              {cloudCount != null && cloudCount > 0 && (
+                <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 rounded-full bg-sky-500 text-[9px] font-bold text-white flex items-center justify-center">
+                  {cloudCount > 99 ? "99+" : cloudCount}
+                </span>
+              )}
+            </button>
           )}
         </div>
 

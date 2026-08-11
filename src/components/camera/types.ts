@@ -59,6 +59,24 @@ export interface CaptureItem {
   burstCount?: number;
   burstId?: string;
   selected?: boolean;
+  cloudUrl?: string;       // Public cloud URL after upload
+  cloudKey?: string;       // Cloud file key for delete
+  cloudUploadedAt?: string;
+}
+
+/** A file that lives on the cloud (https://cloud.kangwifi.eu.org). */
+export interface CloudFile {
+  id: string;
+  name: string;
+  key: string;
+  size: number;
+  sizeHuman: string;
+  mime?: string;
+  status: "local" | "cloud";
+  isPublic: boolean;
+  url: string;        // Direct download URL
+  hfUrl?: string | null; // HuggingFace mirror URL (if synced)
+  createdAt: number;  // Unix ms
 }
 
 export const DEFAULT_SETTINGS: CameraSettings = {

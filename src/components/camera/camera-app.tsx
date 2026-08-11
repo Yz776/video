@@ -25,8 +25,9 @@ import {
   SettingsSheet,
   TopBar,
 } from "./controls";
-import { GalleryStrip, PreviewModal } from "./gallery";
+import { GalleryStrip, PreviewModal, CloudGallery } from "./gallery";
 import { cn } from "@/lib/utils";
+import { listCloudImages } from "./utils";
 
 export function CameraApp() {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -52,6 +53,8 @@ export function CameraApp() {
   const [timerCountdown, setTimerCountdown] = useState<number | null>(null);
   const [burstCount, setBurstCount] = useState<number>(0);
   const [orientation, setOrientation] = useState(0);
+  const [cloudGalleryOpen, setCloudGalleryOpen] = useState(false);
+  const [cloudCount, setCloudCount] = useState<number>(0);
 
   // ---- Camera start / stop ----
   const startCamera = useCallback(
@@ -444,6 +447,39 @@ export function CameraApp() {
     });
   }, []);
 
+  // ---- Update gallery item (e.g. after cloud upload sets cloudUrl) ----
+  const handleItemUpdate = useCallback((updated: CaptureItem) => {
+    setGallery((g) => g.map((it) => (it.id === updated.id ? updated : it)));
+    // Also update the preview if it's the currently open item
+    setPreviewItem((p) => (p && p.id === updated.id ? updated : p));
+  }, []);
+
+  // ---- Fetch cloud file count on mount ----
+  useEffect(() => {
+    let cancelled = false;
+    listCloudImages().then((result) => {
+      if (cancelled) return;
+      if (result.success && result.files) {
+        setCloudCount(result.files.length);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [cloudGalleryOpen]); // refresh count when cloud gallery closes
+
+  // ---- Open cloud gallery if URL has ?cloud=1 (from PWA shortcut) ----
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("cloud") === "1") {
+      setCloudGalleryOpen(true);
+      // Clean the URL so it doesn't reopen on refresh
+      url.searchParams.delete("cloud");
+      window.history.replaceState({}, "", url.toString());
+    }
+  }, []);
+
   const handleClearAll = useCallback(() => {
     setGallery((g) => {
       g.forEach((it) => {
@@ -551,6 +587,8 @@ export function CameraApp() {
           setFacing((f) => (f === "environment" ? "user" : "environment"))
         }
         onOpenSettings={() => setSettingsOpen(true)}
+        onOpenCloud={() => setCloudGalleryOpen(true)}
+        cloudCount={cloudCount}
         hdBadge={hdBadge}
       />
 
@@ -623,6 +661,12 @@ export function CameraApp() {
         item={previewItem}
         onClose={() => setPreviewItem(null)}
         onDelete={handleDelete}
+        onItemUpdate={handleItemUpdate}
+      />
+
+      <CloudGallery
+        open={cloudGalleryOpen}
+        onClose={() => setCloudGalleryOpen(false)}
       />
     </div>
   );
