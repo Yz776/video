@@ -574,9 +574,9 @@ export function CameraApp() {
 
         <div className="flex items-center justify-between gap-4">
           <div className="flex-1 flex flex-col items-start">
-            <div className="text-[10px] text-white/40">WATERMARK</div>
+            <div className="text-[10px] text-white/40">UPSCALE</div>
             <div className="text-xs font-bold text-amber-300 truncate max-w-[80px]">
-              {settings.watermark === "none" ? "OFF" : settings.watermarkText}
+              {settings.upscale > 1 ? `${settings.upscale}× HD` : "Original"}
             </div>
           </div>
           <div className="flex flex-col items-center gap-2">

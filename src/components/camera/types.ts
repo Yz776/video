@@ -18,8 +18,6 @@ export type FilterPreset =
 
 export type AspectRatio = "free" | "1:1" | "4:3" | "16:9" | "3:4";
 
-export type WatermarkPosition = "bl" | "br" | "tl" | "tr" | "c" | "none";
-
 export type TimerDuration = 0 | 3 | 5 | 10;
 
 export interface CameraSettings {
@@ -30,9 +28,6 @@ export interface CameraSettings {
   enhance: boolean;
   filter: FilterPreset;
   aspect: AspectRatio;
-  watermark: WatermarkPosition;
-  watermarkText: string;
-  watermarkOpacity: number;
   vignette: boolean;
   hdr: boolean;
   grid: boolean;
@@ -68,15 +63,12 @@ export interface CaptureItem {
 
 export const DEFAULT_SETTINGS: CameraSettings = {
   upscale: 2,
-  quality: 95,
+  quality: 98,
   sharpen: true,
   denoise: true,
   enhance: true,
   filter: "none",
   aspect: "free",
-  watermark: "br",
-  watermarkText: "kangwifi cam",
-  watermarkOpacity: 0.85,
   vignette: false,
   hdr: false,
   grid: true,

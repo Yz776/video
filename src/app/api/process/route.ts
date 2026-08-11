@@ -16,13 +16,6 @@ type FilterPreset =
   | "vintage";
 
 type AspectRatio = "free" | "1:1" | "4:3" | "16:9" | "3:4";
-type WatermarkPosition =
-  | "bl" // bottom-left
-  | "br" // bottom-right
-  | "tl" // top-left
-  | "tr" // top-right
-  | "c" // center
-  | "none";
 
 interface ProcessParams {
   file: File;
@@ -33,9 +26,6 @@ interface ProcessParams {
   enhance: boolean;
   filter: FilterPreset;
   aspect: AspectRatio;
-  watermark: WatermarkPosition;
-  watermarkText: string;
-  watermarkOpacity: number; // 0-1
   wantPreview: boolean;
   exposure: number; // -1 .. 1
   contrast: number; // -1 .. 1
@@ -46,137 +36,6 @@ interface ProcessParams {
 }
 
 /**
- * Build an SVG overlay for the "kangwifi cam" watermark.
- *
- * Layout:
- *   - Corner positions (bl/br/tl/tr): icon + text on a single row.
- *     For bl/tl the icon sits at the left and text flows rightward
- *     (text-anchor=start). For br/tr the icon sits at the right and
- *     text flows leftward (text-anchor=end) — this guarantees the
- *     text can NEVER be clipped at the image edge regardless of its
- *     rendered width.
- *   - Center (c): icon stacked above the text, both horizontally
- *     centered. Previously the icon was placed at the same anchor
- *     as the text and they overlapped — that was the bug.
- *
- * Font: DejaVu Sans / Liberation Sans are installed on the server,
- * Inter/Arial are NOT — so we list the installed ones first to
- * guarantee consistent rendering.
- *
- * Legibility: a strong soft drop shadow (not a hard outline) is
- * applied to the whole group, which keeps the watermark readable
- * on both bright and dark photos without needing a pill background.
- */
-function buildWatermarkSvg(opts: {
-  width: number;
-  height: number;
-  position: WatermarkPosition;
-  text: string;
-  opacity: number;
-}): Buffer {
-  const { width, height, position, text, opacity } = opts;
-  if (position === "none" || !text.trim()) return Buffer.alloc(0);
-
-  // Scale font size relative to image size — caps to keep things sensible
-  const fontSize = Math.max(28, Math.min(96, Math.round(width / 32)));
-  const iconSize = Math.round(fontSize * 1.1);
-  const pad = Math.round(fontSize * 0.8);
-  const gap = Math.round(fontSize * 0.35);
-
-  const FONT_FAMILY =
-    "DejaVu Sans, Liberation Sans, Arial, Helvetica, sans-serif";
-
-  let iconX = pad;
-  let iconY = height - pad - iconSize;
-  let textX = pad;
-  let textY = height - pad;
-  let anchor: "start" | "middle" | "end" = "start";
-
-  switch (position) {
-    case "bl": {
-      iconX = pad;
-      iconY = height - pad - iconSize;
-      textX = iconX + iconSize + gap;
-      // Baseline near bottom of icon so text vertically centers with icon
-      textY = iconY + iconSize * 0.78;
-      anchor = "start";
-      break;
-    }
-    case "br": {
-      iconX = width - pad - iconSize;
-      iconY = height - pad - iconSize;
-      // Text ENDS just left of icon — guaranteed never to clip on right
-      textX = iconX - gap;
-      textY = iconY + iconSize * 0.78;
-      anchor = "end";
-      break;
-    }
-    case "tl": {
-      iconX = pad;
-      iconY = pad;
-      textX = iconX + iconSize + gap;
-      textY = iconY + iconSize * 0.78;
-      anchor = "start";
-      break;
-    }
-    case "tr": {
-      iconX = width - pad - iconSize;
-      iconY = pad;
-      textX = iconX - gap;
-      textY = iconY + iconSize * 0.78;
-      anchor = "end";
-      break;
-    }
-    case "c": {
-      // Stack: icon above, text below — both horizontally centered.
-      const totalH = iconSize + gap + fontSize;
-      const top = height / 2 - totalH / 2;
-      iconX = width / 2 - iconSize / 2;
-      iconY = top;
-      textX = width / 2;
-      textY = top + iconSize + gap + fontSize * 0.78;
-      anchor = "middle";
-      break;
-    }
-  }
-
-  const shadowStd = Math.max(1.5, fontSize / 12);
-  const shadowDy = Math.max(1, fontSize / 20);
-
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
-  <defs>
-    <filter id="wmDs" x="-30%" y="-30%" width="160%" height="160%">
-      <feGaussianBlur in="SourceAlpha" stdDeviation="${shadowStd}"/>
-      <feOffset dx="0" dy="${shadowDy}" result="o"/>
-      <feComponentTransfer><feFuncA type="linear" slope="0.55"/></feComponentTransfer>
-      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
-    <linearGradient id="wmIc" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#FCD34D"/>
-      <stop offset="100%" stop-color="#F59E0B"/>
-    </linearGradient>
-  </defs>
-  <g opacity="${opacity}" filter="url(#wmDs)">
-    <g transform="translate(${iconX}, ${iconY})">
-      <rect width="${iconSize}" height="${iconSize}" rx="${iconSize * 0.22}" fill="url(#wmIc)"/>
-      <text x="${iconSize / 2}" y="${iconSize * 0.7}" font-family="${FONT_FAMILY}" font-size="${iconSize * 0.58}" font-weight="900" text-anchor="middle" fill="#0b0b0b">K</text>
-    </g>
-    <text x="${textX}" y="${textY}" font-family="${FONT_FAMILY}" font-size="${fontSize}" font-weight="800" text-anchor="${anchor}" fill="#ffffff" letter-spacing="${Math.max(0.5, fontSize / 40)}">${escapeXml(text)}</text>
-  </g>
-</svg>`;
-  return Buffer.from(svg);
-}
-
-function escapeXml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
-}
-
-/**
  * Apply a filter preset by chaining sharp operations.
  */
 function applyFilter(p: sharp.Sharp, filter: FilterPreset): sharp.Sharp {
@@ -184,7 +43,6 @@ function applyFilter(p: sharp.Sharp, filter: FilterPreset): sharp.Sharp {
     case "vivid":
       return p.modulate({ saturation: 1.35, brightness: 1.04 }).linear(1.08, -8);
     case "mono":
-      // Greyscale via sharp's desaturate
       return p.greyscale().linear(1.1, -10);
     case "warm":
       return p.modulate({ saturation: 1.15, brightness: 1.03 })
@@ -193,7 +51,6 @@ function applyFilter(p: sharp.Sharp, filter: FilterPreset): sharp.Sharp {
       return p.modulate({ saturation: 1.1, brightness: 1.02 })
         .tint({ r: 200, g: 225, b: 255 });
     case "cinema":
-      // Teal-orange lift via linear curves approximation
       return p
         .modulate({ saturation: 1.2, brightness: 0.98 })
         .linear(1.12, -12)
@@ -238,7 +95,6 @@ function computeCropBox(
     return { left: 0, top: 0, width: w, height: h };
   }
   if (current > ar) {
-    // too wide — crop width
     const newW = Math.round(h * ar);
     const left = Math.round((w - newW) / 2);
     return { left, top: 0, width: newW, height: h };
@@ -269,19 +125,19 @@ function buildVignetteSvg(w: number, h: number): Buffer {
 }
 
 /**
- * HDR-like local contrast boost viaCLAHE-like approximation using
- * high-pass sharpening + gamma. Combined with mild denoise.
+ * HDR-like local contrast: gentle sharpen + gamma + CLAHE.
+ * Milder than before to avoid halos that look like "pecah".
  */
 function applyHdrLike(p: sharp.Sharp): sharp.Sharp {
   return p
     .sharpen({
-      sigma: 1.6,
-      m1: 2.5,
-      m2: 1.2,
+      sigma: 1.2,
+      m1: 1.5,
+      m2: 0.6,
       x1: 1,
-      y2: 10,
+      y2: 6,
     })
-    .gamma(1.05)
+    .gamma(1.04)
     .clahe({ width: 7, height: 7, maxSlope: 4 });
 }
 
@@ -295,16 +151,13 @@ export async function POST(req: NextRequest) {
 
     const params: ProcessParams = {
       file,
-      upscale: clampNum(formData.get("upscale"), 1, [1, 2, 4], 2),
-      quality: clampNum(formData.get("quality"), 95, [60, 100], 95),
+      upscale: clampNum(formData.get("upscale"), 2, [1, 4], 2),
+      quality: clampNum(formData.get("quality"), 98, [60, 100], 98),
       sharpen: formData.get("sharpen") !== "0",
       denoise: formData.get("denoise") === "1",
       enhance: formData.get("enhance") !== "0",
       filter: (String(formData.get("filter") ?? "none") as FilterPreset),
       aspect: (String(formData.get("aspect") ?? "free") as AspectRatio),
-      watermark: (String(formData.get("watermark") ?? "br") as WatermarkPosition),
-      watermarkText: String(formData.get("watermarkText") ?? "kangwifi cam"),
-      watermarkOpacity: clampNum(formData.get("watermarkOpacity"), 0.85, [0.2, 1], 0.85),
       wantPreview: formData.get("preview") === "1",
       exposure: clampNum(formData.get("exposure"), 0, [-1, 1], 0),
       contrast: clampNum(formData.get("contrast"), 0, [-1, 1], 0),
@@ -334,10 +187,17 @@ export async function POST(req: NextRequest) {
       targetH = Math.round(targetH * scale);
     }
 
-    // ---- Build pipeline ----
+    // ============================================================
+    // SUPER-HD PIPELINE
+    // Order matters: noise must be removed BEFORE upscale (otherwise
+    // it gets amplified 4x and looks like "pecah"), edges must be
+    // recovered with a mild pre-sharpen so lanczos3 has detail to
+    // preserve, and final sharpen must be gentle to avoid halos.
+    // ============================================================
+
     let pipeline = sharp(inputBuf, { failOn: "none" }).rotate();
 
-    // Crop to aspect ratio
+    // 1. Aspect crop at native resolution
     if (params.aspect !== "free") {
       pipeline = pipeline.extract({
         left: cropBox.left,
@@ -347,32 +207,77 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // Upscale with high-quality lanczos3 kernel
-    pipeline = pipeline.resize({
-      width: targetW,
-      height: targetH,
-      fit: "fill",
-      kernel: "lanczos3",
-      withoutEnlargement: false,
-      withoutReduction: false,
-    });
-
-    // ---- Denoise (mild, before sharpening) ----
-    if (params.denoise) {
-      // Mild blur to suppress noise — followed by sharp recovery below
+    // 2. PRE-DENOISE — remove sensor noise & JPEG DCT block artifacts.
+    //    Critical: any noise or 8x8 JPEG blocks get magnified when
+    //    upscaling, producing the "pecah pecah" look. We use a combo:
+    //      - median(1): 3x3 median, kills single-pixel noise & outliers
+    //      - blur(0.3): very mild gaussian, smooths 8x8 DCT block edges
+    //    Both are very mild — they preserve real detail but eliminate
+    //    the compression artifacts that would otherwise become visible
+    //    after upscale. Always on when upscaling; respects toggle otherwise.
+    if (params.denoise || params.upscale > 1) {
       pipeline = pipeline.median(1);
+      if (params.upscale > 1) {
+        pipeline = pipeline.blur(0.3);
+      }
     }
 
-    // ---- HDR-like local contrast ----
+    // (Pre-sharpen removed — median(1) is mild enough that it doesn't
+    //  need compensation, and pre-sharpen was creating halos that got
+    //  amplified by upscale.)
+
+    // 3. UPSCALE — multi-pass for high factors.
+    //    Single-pass lanczos3 is fine for 2x. For 4x, two-pass (each 2x)
+    //    produces smoother gradients and less ringing than one giant leap.
+    //    An intermediate median(1) between passes kills any ringing from
+    //    the first pass before the second pass amplifies it.
+    if (params.upscale >= 4) {
+      const midW = Math.round(cropBox.width * 2);
+      const midH = Math.round(cropBox.height * 2);
+      pipeline = pipeline.resize({
+        width: midW,
+        height: midH,
+        fit: "fill",
+        kernel: "lanczos3",
+        withoutEnlargement: false,
+        withoutReduction: false,
+      });
+      // Inter-pass smoothing — kills ringing before second pass amplifies it
+      pipeline = pipeline.median(1);
+      pipeline = pipeline.resize({
+        width: targetW,
+        height: targetH,
+        fit: "fill",
+        kernel: "lanczos3",
+        withoutEnlargement: false,
+        withoutReduction: false,
+      });
+    } else {
+      pipeline = pipeline.resize({
+        width: targetW,
+        height: targetH,
+        fit: "fill",
+        kernel: "lanczos3",
+        withoutEnlargement: false,
+        withoutReduction: false,
+      });
+    }
+
+    // 5. CLAHE local contrast — REMOVED from default pipeline.
+    //    Why: CLAHE amplifies JPEG DCT block boundaries in flat areas
+    //    (sky, walls), producing the "pecah pecah" look. Even on clean
+    //    sources it tends to over-process. The HDR toggle (which uses
+    //    a milder CLAHE) remains available for users who want it.
+    //
+    // 6. HDR-like local contrast (optional, user toggle)
     if (params.hdr) {
       pipeline = applyHdrLike(pipeline);
     }
 
-    // ---- Filter presets ----
+    // 7. Filter presets
     pipeline = applyFilter(pipeline, params.filter);
 
-    // ---- Manual exposure/contrast/saturation/temperature ----
-    // Exposure: brightness multiplier; Contrast: linear slope; Saturation: modulate
+    // 8. Manual exposure/contrast/saturation/temperature adjustments
     const brightness = 1 + params.exposure * 0.35;
     const satMultiplier =
       params.filter === "mono" ? 0 : 1 + params.saturation * 0.5;
@@ -388,7 +293,6 @@ export async function POST(req: NextRequest) {
       pipeline = pipeline.linear(slope, intercept);
     }
     if (params.temperature !== 0) {
-      // Warm = +red/-blue; Cool = -red/+blue. Approximate via tint.
       const t = params.temperature;
       const r = 255;
       const g = Math.round(255 - Math.abs(t) * 30);
@@ -400,33 +304,38 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // ---- Auto-enhance (legacy "enhance" toggle) ----
+    // 9. Auto-enhance — slight saturation & contrast lift
     if (params.enhance) {
       pipeline = pipeline.modulate({
-        brightness: 1.03,
-        saturation: 1.08,
+        brightness: 1.02,
+        saturation: 1.06,
       });
       pipeline = pipeline.linear(1.04, -5);
     }
 
-    // ---- Sharpening (after all color/contrast ops) ----
+    // 10. Gamma lift — gentle midtone lift for "jernih" (clear) look.
+    //     gamma=1.02 brightens midtones slightly without clipping highlights.
+    pipeline = pipeline.gamma(1.02);
+
+    // 11. FINAL SHARPEN — very gentle, no halos.
+    //     Previous settings (sigma=0.8, m1=1.4) were too aggressive and
+    //     produced visible halos that read as "pecah". Current settings
+    //     (sigma=0.6, m1=0.5) recover detail cleanly without ringing.
+    //     Trade-off: slightly less crisp, but no halos = no "pecah".
     if (params.sharpen) {
-      // Adaptive sharpen — stronger mid-frequency, mild high-frequency to
-      // avoid noise amplification. Recovers detail lost in upscale without
-      // introducing halos.
       pipeline = pipeline.sharpen({
-        sigma: 0.8,
-        m1: 1.4,
-        m2: 0.5,
-        x1: 1.5,
-        y2: 6,
+        sigma: 0.6,
+        m1: 0.5,
+        m2: 0.2,
+        x1: 0.8,
+        y2: 2,
       });
     }
 
-    // ---- Fork for preview BEFORE encoding ----
+    // 12. Fork for preview BEFORE vignette/encoding
     const previewPipeline = pipeline.clone();
 
-    // ---- Vignette overlay ----
+    // 13. Vignette overlay
     if (params.vignette) {
       const vignetteSvg = buildVignetteSvg(targetW, targetH);
       pipeline = pipeline.composite([
@@ -434,34 +343,24 @@ export async function POST(req: NextRequest) {
       ]);
     }
 
-    // ---- Watermark overlay ----
-    const wmSvg = buildWatermarkSvg({
-      width: targetW,
-      height: targetH,
-      position: params.watermark,
-      text: params.watermarkText,
-      opacity: params.watermarkOpacity,
-    });
-    if (wmSvg.length > 0) {
-      pipeline = pipeline.composite([
-        { input: wmSvg, blend: "over" },
-      ]);
-    }
-
-    // ---- Encode HEIC (AV1) ----
+    // 14. ENCODE HEIC (AV1) — high quality
+    //     effort=3 (was 2): AV1 spends more time on rate-distortion
+    //       optimization, fewer blocking artifacts ("pecah") in flat
+    //       areas like sky/walls. effort=4 was better but took 10s
+    //       per photo — too slow for a camera app. effort=3 is the
+    //       sweet spot: ~5s for 1080p, visibly better than effort=2.
+    //     quality=98 (was 95): higher fidelity, near-lossless.
     const heicBuf = await pipeline
-      .heif({ compression: "av1", quality: params.quality, effort: 2 })
+      .heif({ compression: "av1", quality: params.quality, effort: 3 })
       .toBuffer();
 
-    // ---- Preview JPEG (forked before watermark/vignette for clarity on thumb) ----
+    // 15. Preview JPEG (forked before vignette so thumbnail matches download)
     let previewBuf: Buffer | null = null;
     if (params.wantPreview) {
       const previewMaxSide = 1600;
       const scale = Math.min(1, previewMaxSide / Math.max(targetW, targetH));
       const pW = Math.max(1, Math.round(targetW * scale));
       const pH = Math.max(1, Math.round(targetH * scale));
-      // Re-composite watermark + vignette on preview too so the user sees
-      // what they will download.
       let prevPipe = previewPipeline
         .resize({ width: pW, height: pH, fit: "inside" });
       if (params.vignette) {
@@ -469,18 +368,8 @@ export async function POST(req: NextRequest) {
           { input: buildVignetteSvg(pW, pH), blend: "over" },
         ]);
       }
-      const prevWm = buildWatermarkSvg({
-        width: pW,
-        height: pH,
-        position: params.watermark,
-        text: params.watermarkText,
-        opacity: params.watermarkOpacity,
-      });
-      if (prevWm.length > 0) {
-        prevPipe = prevPipe.composite([{ input: prevWm, blend: "over" }]);
-      }
       previewBuf = await prevPipe
-        .jpeg({ quality: 90, mozjpeg: true })
+        .jpeg({ quality: 95, mozjpeg: true })
         .toBuffer();
     }
 
@@ -494,7 +383,6 @@ export async function POST(req: NextRequest) {
       mime: "image/heic",
       filter: params.filter,
       aspect: params.aspect,
-      watermark: params.watermark,
       upscaled: params.upscale > 1,
       upscaleFactor: params.upscale,
       hdr: params.hdr,

@@ -8,7 +8,6 @@ import {
   CameraSettings,
   FilterPreset,
   AspectRatio,
-  WatermarkPosition,
   TimerDuration,
 } from "./types";
 import {
@@ -294,15 +293,6 @@ const ASPECTS: { id: AspectRatio; label: string }[] = [
   { id: "3:4", label: "3:4" },
 ];
 
-const WM_POSITIONS: { id: WatermarkPosition; label: string }[] = [
-  { id: "none", label: "Off" },
-  { id: "bl", label: "↙" },
-  { id: "br", label: "↘" },
-  { id: "tl", label: "↖" },
-  { id: "tr", label: "↗" },
-  { id: "c", label: "●" },
-];
-
 const TIMERS: { id: TimerDuration; label: string }[] = [
   { id: 0, label: "Off" },
   { id: 3, label: "3s" },
@@ -316,7 +306,7 @@ export function SettingsSheet({
   settings,
   onSettingsChange,
 }: SettingsSheetProps) {
-  const [tab, setTab] = useState<"quality" | "filter" | "wm" | "adjust">(
+  const [tab, setTab] = useState<"quality" | "filter" | "adjust">(
     "quality",
   );
   const update = (patch: Partial<CameraSettings>) =>
@@ -341,7 +331,6 @@ export function SettingsSheet({
             ["quality", "Kualitas"],
             ["filter", "Filter"],
             ["adjust", "Adjust"],
-            ["wm", "Watermark"],
           ] as const).map(([id, label]) => (
             <button
               key={id}
@@ -509,68 +498,6 @@ export function SettingsSheet({
                 onValueChange={(v) => update({ zoom: v })}
                 showValue={(v) => `${v.toFixed(1)}×`}
               />
-            </>
-          )}
-
-          {tab === "wm" && (
-            <>
-              {/* Watermark text */}
-              <div className="space-y-2">
-                <Label className="text-xs text-white/70 uppercase tracking-wider">
-                  Teks Watermark
-                </Label>
-                <input
-                  type="text"
-                  value={settings.watermarkText}
-                  onChange={(e) => update({ watermarkText: e.target.value })}
-                  placeholder="kangwifi cam"
-                  className="w-full px-3 py-2.5 bg-zinc-900 border border-zinc-700 rounded-xl text-white text-sm focus:outline-none focus:border-amber-300"
-                />
-              </div>
-
-              {/* Position */}
-              <div className="space-y-2">
-                <Label className="text-xs text-white/70 uppercase tracking-wider">
-                  Posisi Watermark
-                </Label>
-                <div className="grid grid-cols-6 gap-1.5">
-                  {WM_POSITIONS.map((p) => (
-                    <button
-                      key={p.id}
-                      onClick={() => update({ watermark: p.id })}
-                      className={cn(
-                        "aspect-square rounded-lg text-sm font-bold transition-colors flex items-center justify-center",
-                        settings.watermark === p.id
-                          ? "bg-amber-300 text-black"
-                          : "bg-zinc-800 text-white/70",
-                      )}
-                    >
-                      {p.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Opacity */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <Label className="text-xs text-white/70 uppercase tracking-wider">
-                    Opacity
-                  </Label>
-                  <span className="text-sm font-bold text-amber-300 tabular-nums">
-                    {Math.round(settings.watermarkOpacity * 100)}%
-                  </span>
-                </div>
-                <Slider
-                  value={[Math.round(settings.watermarkOpacity * 100)]}
-                  min={20}
-                  max={100}
-                  step={5}
-                  onValueChange={(v) =>
-                    update({ watermarkOpacity: v[0] / 100 })
-                  }
-                />
-              </div>
             </>
           )}
         </div>

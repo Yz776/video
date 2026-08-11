@@ -75,7 +75,7 @@ export async function captureFullResolutionPhoto(
 }
 
 /**
- * Send a still image to the backend for upscale + HEIC + watermark + filter.
+ * Send a still image to the backend for upscale + HEIC + filter.
  */
 export async function processToHeic(
   blob: Blob,
@@ -98,9 +98,6 @@ export async function processToHeic(
   fd.append("enhance", settings.enhance ? "1" : "0");
   fd.append("filter", settings.filter);
   fd.append("aspect", settings.aspect);
-  fd.append("watermark", settings.watermark);
-  fd.append("watermarkText", settings.watermarkText);
-  fd.append("watermarkOpacity", String(settings.watermarkOpacity));
   fd.append("vignette", settings.vignette ? "1" : "0");
   fd.append("hdr", settings.hdr ? "1" : "0");
   fd.append("preview", "1");
@@ -124,7 +121,6 @@ export async function processToHeic(
     originalHeight: number;
     filter: string;
     aspect: string;
-    watermark: string;
     upscaled: boolean;
     upscaleFactor: number;
     hdr: boolean;
