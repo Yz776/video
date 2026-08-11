@@ -47,8 +47,25 @@ interface ProcessParams {
 
 /**
  * Build an SVG overlay for the "kangwifi cam" watermark.
- * Includes: a stylized K icon + label text, with subtle drop shadow
- * for legibility on any background.
+ *
+ * Layout:
+ *   - Corner positions (bl/br/tl/tr): icon + text on a single row.
+ *     For bl/tl the icon sits at the left and text flows rightward
+ *     (text-anchor=start). For br/tr the icon sits at the right and
+ *     text flows leftward (text-anchor=end) — this guarantees the
+ *     text can NEVER be clipped at the image edge regardless of its
+ *     rendered width.
+ *   - Center (c): icon stacked above the text, both horizontally
+ *     centered. Previously the icon was placed at the same anchor
+ *     as the text and they overlapped — that was the bug.
+ *
+ * Font: DejaVu Sans / Liberation Sans are installed on the server,
+ * Inter/Arial are NOT — so we list the installed ones first to
+ * guarantee consistent rendering.
+ *
+ * Legibility: a strong soft drop shadow (not a hard outline) is
+ * applied to the whole group, which keeps the watermark readable
+ * on both bright and dark photos without needing a pill background.
  */
 function buildWatermarkSvg(opts: {
   width: number;
@@ -64,71 +81,87 @@ function buildWatermarkSvg(opts: {
   const fontSize = Math.max(28, Math.min(96, Math.round(width / 32)));
   const iconSize = Math.round(fontSize * 1.1);
   const pad = Math.round(fontSize * 0.8);
+  const gap = Math.round(fontSize * 0.35);
 
-  // Position
-  let x = pad;
-  let y = height - pad;
-  let anchor: "start" | "end" = "start";
+  const FONT_FAMILY =
+    "DejaVu Sans, Liberation Sans, Arial, Helvetica, sans-serif";
+
   let iconX = pad;
+  let iconY = height - pad - iconSize;
+  let textX = pad;
+  let textY = height - pad;
+  let anchor: "start" | "middle" | "end" = "start";
+
   switch (position) {
-    case "bl":
-      x = pad;
-      y = height - pad;
-      anchor = "start";
+    case "bl": {
       iconX = pad;
-      break;
-    case "br":
-      x = width - pad;
-      y = height - pad;
-      anchor = "end";
-      iconX = width - pad - iconSize;
-      break;
-    case "tl":
-      x = pad;
-      y = pad + fontSize;
+      iconY = height - pad - iconSize;
+      textX = iconX + iconSize + gap;
+      // Baseline near bottom of icon so text vertically centers with icon
+      textY = iconY + iconSize * 0.78;
       anchor = "start";
-      iconX = pad;
       break;
-    case "tr":
-      x = width - pad;
-      y = pad + fontSize;
-      anchor = "end";
+    }
+    case "br": {
       iconX = width - pad - iconSize;
+      iconY = height - pad - iconSize;
+      // Text ENDS just left of icon — guaranteed never to clip on right
+      textX = iconX - gap;
+      textY = iconY + iconSize * 0.78;
+      anchor = "end";
       break;
-    case "c":
-      x = width / 2;
-      y = height / 2;
-      anchor = "middle";
+    }
+    case "tl": {
+      iconX = pad;
+      iconY = pad;
+      textX = iconX + iconSize + gap;
+      textY = iconY + iconSize * 0.78;
+      anchor = "start";
+      break;
+    }
+    case "tr": {
+      iconX = width - pad - iconSize;
+      iconY = pad;
+      textX = iconX - gap;
+      textY = iconY + iconSize * 0.78;
+      anchor = "end";
+      break;
+    }
+    case "c": {
+      // Stack: icon above, text below — both horizontally centered.
+      const totalH = iconSize + gap + fontSize;
+      const top = height / 2 - totalH / 2;
       iconX = width / 2 - iconSize / 2;
+      iconY = top;
+      textX = width / 2;
+      textY = top + iconSize + gap + fontSize * 0.78;
+      anchor = "middle";
       break;
+    }
   }
 
-  const textX = position === "bl" || position === "tl"
-    ? x + iconSize + pad * 0.4
-    : position === "br" || position === "tr"
-      ? x - iconSize - pad * 0.4
-      : x;
+  const shadowStd = Math.max(1.5, fontSize / 12);
+  const shadowDy = Math.max(1, fontSize / 20);
 
-  // Use two-tone: amber "kangwifi" + white "cam" for visual punch
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
   <defs>
-    <filter id="ds" x="-20%" y="-20%" width="140%" height="140%">
-      <feGaussianBlur in="SourceAlpha" stdDeviation="${Math.max(1, fontSize / 18)}"/>
-      <feOffset dx="0" dy="${Math.max(1, fontSize / 24)}" result="o"/>
-      <feComponentTransfer><feFuncA type="linear" slope="0.7"/></feComponentTransfer>
+    <filter id="wmDs" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="${shadowStd}"/>
+      <feOffset dx="0" dy="${shadowDy}" result="o"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.55"/></feComponentTransfer>
       <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
-    <linearGradient id="ic" x1="0%" y1="0%" x2="100%" y2="100%">
+    <linearGradient id="wmIc" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#FCD34D"/>
       <stop offset="100%" stop-color="#F59E0B"/>
     </linearGradient>
   </defs>
-  <g opacity="${opacity}" filter="url(#ds)">
-    <g transform="translate(${iconX}, ${y - iconSize})">
-      <rect width="${iconSize}" height="${iconSize}" rx="${iconSize * 0.22}" fill="url(#ic)"/>
-      <text x="${iconSize / 2}" y="${iconSize * 0.7}" font-family="Inter, Arial, sans-serif" font-size="${iconSize * 0.55}" font-weight="900" text-anchor="middle" fill="#000">K</text>
+  <g opacity="${opacity}" filter="url(#wmDs)">
+    <g transform="translate(${iconX}, ${iconY})">
+      <rect width="${iconSize}" height="${iconSize}" rx="${iconSize * 0.22}" fill="url(#wmIc)"/>
+      <text x="${iconSize / 2}" y="${iconSize * 0.7}" font-family="${FONT_FAMILY}" font-size="${iconSize * 0.58}" font-weight="900" text-anchor="middle" fill="#0b0b0b">K</text>
     </g>
-    <text x="${textX}" y="${y - iconSize * 0.18}" font-family="Inter, Arial, sans-serif" font-size="${fontSize}" font-weight="800" text-anchor="${anchor}" fill="#ffffff" letter-spacing="${Math.max(0.5, fontSize / 36)}">${escapeXml(text)}</text>
+    <text x="${textX}" y="${textY}" font-family="${FONT_FAMILY}" font-size="${fontSize}" font-weight="800" text-anchor="${anchor}" fill="#ffffff" letter-spacing="${Math.max(0.5, fontSize / 40)}">${escapeXml(text)}</text>
   </g>
 </svg>`;
   return Buffer.from(svg);
