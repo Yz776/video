@@ -38,6 +38,14 @@ export interface CameraSettings {
   contrast: number; // -1 .. 1
   saturation: number; // -1 .. 1
   temperature: number; // -1 .. 1
+  /**
+   * When true, captures are uploaded to cloud.kangwifi.eu.org after being
+   * saved locally. When false (default), captures stay only in this
+   * device's IndexedDB — no network upload happens at all.
+   *
+   * Default: false (offline-first). User can enable in Settings.
+   */
+  cloudUpload: boolean;
 }
 
 export interface CaptureItem {
@@ -97,4 +105,5 @@ export const DEFAULT_SETTINGS: CameraSettings = {
   contrast: 0,
   saturation: 0,
   temperature: 0,
+  cloudUpload: false,
 };

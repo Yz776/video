@@ -35,6 +35,8 @@ import {
   Flame,
   Aperture,
   Cloud as CloudIcon,
+  CloudUpload,
+  HardDrive,
 } from "lucide-react";
 import {
   Sheet,
@@ -367,6 +369,42 @@ export function SettingsSheet({
         <div className="px-1 pb-6 space-y-5">
           {tab === "quality" && (
             <>
+              {/* Cloud upload toggle — placed at top so users find it easily.
+                  Default is OFF (offline-first). When OFF, captures stay
+                  only in this device's local IndexedDB gallery. */}
+              <div
+                className={cn(
+                  "flex items-center justify-between rounded-xl px-4 py-3 border",
+                  settings.cloudUpload
+                    ? "bg-sky-950/60 border-sky-700/60"
+                    : "bg-zinc-900 border-zinc-800",
+                )}
+              >
+                <div className="flex items-start gap-3 flex-1">
+                  <div className="mt-0.5">
+                    {settings.cloudUpload ? (
+                      <CloudUpload className="size-4 text-sky-300" />
+                    ) : (
+                      <HardDrive className="size-4 text-amber-300" />
+                    )}
+                  </div>
+                  <div>
+                    <Label className="text-sm font-medium">
+                      Upload ke Cloud
+                    </Label>
+                    <p className="text-[11px] text-white/50 leading-relaxed">
+                      {settings.cloudUpload
+                        ? "Foto/video diupload ke cloud.kangwifi.eu.org setelah disimpan lokal."
+                        : "Default: foto/video hanya disimpan di perangkat ini. Hemat kuota & lebih privat."}
+                    </p>
+                  </div>
+                </div>
+                <Switch
+                  checked={settings.cloudUpload}
+                  onCheckedChange={(c) => update({ cloudUpload: c })}
+                />
+              </div>
+
               {/* Upscale */}
               <div className="space-y-2">
                 <Label className="text-xs text-white/70 uppercase tracking-wider flex items-center gap-1.5">
@@ -523,6 +561,18 @@ export function SettingsSheet({
 
         {/* Bottom quick toggles (always visible) */}
         <div className="border-t border-zinc-800 pt-4 pb-2 flex flex-wrap gap-2 justify-between">
+          <QuickPill
+            icon={
+              settings.cloudUpload ? (
+                <CloudUpload className="size-3.5" />
+              ) : (
+                <HardDrive className="size-3.5" />
+              )
+            }
+            label={settings.cloudUpload ? "Cloud" : "Lokal"}
+            active={settings.cloudUpload}
+            onClick={() => update({ cloudUpload: !settings.cloudUpload })}
+          />
           <QuickPill
             icon={<Grid3x3 className="size-3.5" />}
             label="Grid"

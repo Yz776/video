@@ -728,6 +728,64 @@ export async function uploadCaptureWithLocalFallback(
 }
 
 /**
+ * Save a capture to local IndexedDB ONLY — no cloud upload attempted.
+ *
+ * Used when the user has disabled cloud upload in Settings
+ * (settings.cloudUpload === false). Captures stay on this device only.
+ *
+ * The record is marked cloudStatus="local_only" so the gallery UI shows
+ * the LOKAL badge and the user understands the file is not on the cloud.
+ *
+ * If the user later enables cloud upload, they can manually re-upload
+ * from the gallery detail view (TODO: not yet implemented — for now
+ * files stay local-only until manually re-captured).
+ */
+export async function saveCaptureLocally(
+  mainBlob: Blob,
+  previewBlob: Blob | null,
+  filename: string,
+  mime: string,
+  kind: CaptureKind,
+  width?: number,
+  height?: number,
+): Promise<CaptureStorageResult> {
+  const deviceId = getDeviceId();
+  const localId = genId();
+  const createdAt = Date.now();
+
+  const record: LocalGalleryRecord = {
+    id: localId,
+    deviceId,
+    kind,
+    mime,
+    filename,
+    width,
+    height,
+    size: mainBlob.size,
+    blob: mainBlob,
+    previewBlob,
+    cloudUrl: null,
+    cloudKey: null,
+    hfUrl: null,
+    cloudStatus: "local_only",
+    createdAt,
+  };
+  await saveToLocalGallery(record);
+
+  return {
+    success: true,
+    localId,
+    cloudUrl: null,
+    cloudKey: null,
+    hfUrl: null,
+    cloudPage: CLOUD_PAGE_URL,
+    cloudUploaded: false,
+    filename,
+    mime,
+  };
+}
+
+/**
  * List images/videos for this device, MERGING cloud + local records.
  *
  * Why merge (not either/or)?
