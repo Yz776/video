@@ -434,3 +434,49 @@ Stage Summary:
 - ✅ Per-device isolation preserved (deviceId index in IDB)
 - ✅ User sees toast notification when cloud fails but local succeeds
 - ✅ When cloud recovers later, old local records still work (just no cloudUrl)
+
+---
+Task ID: gallery-merge-local-fix
+Agent: main (Super Z)
+Task: User report "di hp masih sering eror setelah mengupload ke cloud tapi pas di cek ga ada" — gallery shows nothing after upload on mobile
+
+Work Log:
+- Root cause analysis: listCloudImagesWithLocalFallback was either/or — only fell back to local IDB when cloud listing FAILED. But cloud /files endpoint is flaky:
+  * Returns 502 intermittently (cloud upstream timeouts)
+  * Returns 200 with empty/stale list (file propagation delay after upload)
+  * In both cases, local fallback didn't trigger and user saw "ga ada"
+- Secondary bug: CloudGallery (full-screen modal) bypassed the fallback entirely — called raw listCloudImages()
+- Tertiary bug: CloudThumb/CloudStripThumb used <img src='local:abc'> which is a fake URL — always failed onError, showed broken icon
+- Quaternary bug: CloudFileDetail used file.url directly — local files couldn't be previewed/downloaded/shared
+- Quinary bug: JustCapturedModal showed "Berhasil di-upload ke cloud" with "undefined" in URL field when cloud failed (info.cloudUrl was undefined but template treated as string)
+- Senary bug: Video capture used raw uploadToCloud (no local fallback) — videos lost when cloud failed
+- Septenary bug: capturePhoto always showed toast.success("Foto tersimpan di cloud") even when only local saved
+
+Fixes applied:
+1. listCloudImagesWithLocalFallback rewritten to MERGE cloud + local (dedupe by cloudKey). Local-only captures always visible regardless of cloud state.
+2. CloudGallery now uses merged fallback.
+3. Added useFileUrl() hook — loads previewBlob from IDB and creates real blob: URL for local files. Revokes on unmount.
+4. CloudFileDetail loads full blob from IDB for local files — preview, download, share all work.
+5. JustCapturedModal now shows distinct "Tersimpan Lokal" amber panel when cloud failed (no more "undefined" URL).
+6. JustCapturedInfo.cloudUrl is now optional; added cloudUploaded boolean flag.
+7. Video capture path switched to uploadCaptureWithLocalFallback — videos saved to IDB when cloud fails.
+8. Live photo clip upload also switched to local fallback.
+9. Toast messages now distinguish cloud vs local for photo/video/burst.
+10. deleteCloudFile() now handles "local:" keys by deleting from IDB.
+11. Added LOKAL badge in gallery thumbnails (amber) vs HF badge (emerald) for cloud-synced.
+12. Added amber indicator dot in CloudStripThumb for local files.
+
+Verified:
+- Build succeeded (4 routes compiled)
+- Bundle contains: isLocalFileUrl, getLocalBlobUrl, cloudUploaded, Tersimpan Lokal, LOKAL
+- Committed 33b12c3
+- Push failed: no GitHub credentials configured in this environment — user needs to push manually
+
+Stage Summary:
+- ✅ Local files ALWAYS visible in gallery (cloud strip + full modal) regardless of cloud state
+- ✅ Local thumbnails render correctly via IDB previewBlob → blob: URL
+- ✅ Local files can be previewed full-screen, downloaded, and shared
+- ✅ JustCapturedModal clearly distinguishes cloud vs local state — no more misleading "undefined" URL
+- ✅ Videos now also have local fallback (previously only photos did)
+- ✅ LOKAL badge helps user understand which files need cloud sync retry
+- ⚠️ Push to GitHub requires user to run: git push origin main (no credentials in this env)
