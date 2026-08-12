@@ -480,3 +480,45 @@ Stage Summary:
 - ✅ Videos now also have local fallback (previously only photos did)
 - ✅ LOKAL badge helps user understand which files need cloud sync retry
 - ⚠️ Push to GitHub requires user to run: git push origin main (no credentials in this env)
+
+---
+Task ID: cloud-upload-off-by-default
+Agent: main (Super Z)
+Task: User request "buat agar upload cloud secara default off"
+
+Work Log:
+- Added `cloudUpload: boolean` to CameraSettings (default: false)
+- Added saveCaptureLocally() in utils.ts — saves to IDB only, no cloud attempt, marks record as "local_only"
+- Modified uploadCapture (camera-app.tsx) to branch:
+    cloudUpload=true  → uploadCaptureWithLocalFallback (existing — tries cloud, falls back to local)
+    cloudUpload=false → saveCaptureLocally (new — local-only, no network)
+- Modified video capture path (toggleVideoRecording r.onstop) — same branch logic
+- Modified live photo clip upload — skipped entirely when cloudUpload=false (clip would be redundant local copy)
+- Added Switch UI in SettingsSheet (top of "Kualitas" tab):
+    * CloudUpload icon (sky) when ON, HardDrive icon (amber) when OFF
+    * Dynamic description explaining trade-off
+- Added QuickPill at bottom of SettingsSheet: "Cloud" (sky, active) or "Lokal" (zinc, inactive) — one-tap toggle
+- Updated processing overlay text:
+    * "Mengunggah ke cloud…" (cloud enabled)
+    * "Menyimpan ke galeri…" (cloud disabled, photo)
+    * "Mengunggah video ke cloud…" / "Menyimpan video ke galeri…" (video variants)
+- Updated toast messages for 3 outcomes (was 2):
+    * "tersimpan di cloud" (cloud uploaded)
+    * "tersimpan lokal" (cloud disabled — expected state, success toast)
+    * warning toast (cloud enabled but failed)
+- Applied 3-way toast distinction to photo, video, and burst modes
+
+Verified:
+- Build succeeded (4 routes compiled)
+- Bundle contains: "Upload ke Cloud", "cloudUpload", "Menyimpan ke galeri", "Tersimpan lokal", "Cloud", "Lokal"
+- Dev server running on :3000 (HTTP 200)
+- Committed 38e59de
+- Push failed: no GitHub credentials in this environment — user needs to push manually
+
+Stage Summary:
+- ✅ Cloud upload is OFF by default — captures stay local only
+- ✅ User can opt-in via Settings → Kualitas → "Upload ke Cloud" toggle
+- ✅ Quick toggle pill at bottom of Settings for fast access
+- ✅ Processing overlay and toast messages correctly reflect cloud state
+- ✅ Local-only captures show LOKAL badge in gallery (existing feature, now more relevant)
+- ⚠️ Push to GitHub requires user to run: git push origin main (no credentials in env)
