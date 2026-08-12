@@ -69,7 +69,38 @@ export function CameraApp() {
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [processing, setProcessing] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settings, setSettings] = useState<CameraSettings>(DEFAULT_SETTINGS);
+  // Persist user's camera settings (including cloudUpload) to localStorage so
+  // their preferences survive page refresh. Default is cloudUpload=false
+  // (offline-first) per user request — but if they explicitly enable cloud,
+  // that choice is remembered across sessions.
+  const [settings, setSettings] = useState<CameraSettings>(() => {
+    if (typeof window === "undefined") return DEFAULT_SETTINGS;
+    try {
+      const raw = localStorage.getItem("kangwifi-camera-settings");
+      if (!raw) return DEFAULT_SETTINGS;
+      const saved = JSON.parse(raw) as Partial<CameraSettings>;
+      // Merge saved over default so new fields (added later) get sane defaults
+      // and any missing/invalid field falls back to DEFAULT_SETTINGS.
+      // Most importantly, if a saved pre-update settings object lacks
+      // `cloudUpload`, we default it to false — never true.
+      return { ...DEFAULT_SETTINGS, ...saved, cloudUpload: saved.cloudUpload === true };
+    } catch {
+      return DEFAULT_SETTINGS;
+    }
+  });
+
+  // Persist settings to localStorage whenever they change.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      localStorage.setItem(
+        "kangwifi-camera-settings",
+        JSON.stringify(settings),
+      );
+    } catch {
+      // localStorage may be unavailable (private mode / disabled) — ignore.
+    }
+  }, [settings]);
   const [timerCountdown, setTimerCountdown] = useState<number | null>(null);
   const [burstCount, setBurstCount] = useState<number>(0);
   const [orientation, setOrientation] = useState(0);
