@@ -81,7 +81,7 @@ export interface CloudFile {
 
 export const DEFAULT_SETTINGS: CameraSettings = {
   upscale: 2,
-  quality: 99,
+  quality: 92,
   sharpen: true,
   denoise: true,
   enhance: true,
