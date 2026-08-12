@@ -14,7 +14,8 @@ import {
   captureFullResolutionPhoto,
   deleteCloudFile,
   genId,
-  getIdealStreamConstraints,
+  openCameraStream,
+  CAMERA_CONSTRAINT_LEVELS,
   listCloudImages,
   pickRecorderMime,
   processToHeic,
@@ -89,23 +90,29 @@ export function CameraApp() {
           streamRef.current.getTracks().forEach((t) => t.stop());
           streamRef.current = null;
         }
-        const constraints = getIdealStreamConstraints(facingMode, zoom);
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        // openCameraStream tries STRICT → LOOSE → MINIMAL → BASIC constraints,
+        // so OverconstrainedError on one level auto-falls-back to the next.
+        // This handles front cameras that can't do 4K, old phones that reject
+        // aspectRatio, and Chrome builds that reject `advanced` arrays.
+        const { stream, level } = await openCameraStream(facingMode, zoom);
         streamRef.current = stream;
         // Try to upgrade resolution if browser gave us a low-res stream.
-        // Many Android browsers silently cap at 1280×720 even when 4K was requested.
-        await upgradeStreamResolution(stream);
+        // Skip if we already fell back to BASIC (device is clearly limited).
+        if (level > CAMERA_CONSTRAINT_LEVELS.BASIC) {
+          await upgradeStreamResolution(stream);
+        }
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play().catch(() => {});
         }
         setStreaming(true);
-        // Log actual track settings to console (helps debug resolution issues)
+        // Log actual track settings + which constraint level worked
         const track = stream.getVideoTracks()[0];
         if (track) {
           const s = track.getSettings();
+          const levelName = ["STRICT", "LOOSE", "MINIMAL", "BASIC"][level] ?? `L${level}`;
           console.log(
-            `[camera] active stream: ${s.width}×${s.height} @ ${s.frameRate}fps, facing=${s.facingMode}`,
+            `[camera] active stream: ${s.width}×${s.height} @ ${s.frameRate}fps, facing=${s.facingMode}, constraint=${levelName}`,
           );
         }
         applyTorch(stream, flash === "on" || flash === "torch");

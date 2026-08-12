@@ -1,54 +1,174 @@
 import type { CameraSettings, CloudFile } from "@/components/camera/types";
 
 /**
- * Pick the best constraints for getUserMedia — prefer the highest resolution
- * the device's main camera can provide.
+ * Camera constraint ladder.
  *
- * Strategy: ask for 4K (4096×3072) as `ideal`. If the device can't do 4K,
- * the browser will fall back to the closest supported resolution. We also
- * add `min: 1920×1080` so we never get stuck at 1280×720 (the browser
- * default when no constraints are given) — that would make the viewfinder
- * look soft on modern phone screens.
+ * We try each level in order. The first one that doesn't throw
+ * OverconstrainedError wins. This is necessary because device support
+ * varies wildly:
+ *   - Flagship Android: handles 4K ideal + min 1080p + advanced ladder fine
+ *   - Mid-range Android: rejects `min: 1080` on front camera (only 720p)
+ *   - Old phones / webcams: reject `aspectRatio` and `frameRate.min`
+ *   - Some Chrome builds: reject `advanced` entirely
  *
- * The `advanced` array lists additional resolution candidates the browser
- * should try in order if the primary ideal fails. Many Android phones cap
- * stream at 1920×1080 for live preview, so we explicitly list that as a
- * fallback so the viewfinder stays crisp HD rather than dropping to SD.
+ * Level 0 (STRICT): 4K ideal + min 1080p + 4:3 aspect + 30fps + advanced ladder
+ * Level 1 (LOOSE):  4K ideal + advanced ladder (no min, no aspect, no fps min)
+ * Level 2 (MINIMAL): just width/height ideal, no advanced
+ * Level 3 (BASIC):  facingMode only — last resort, always works
+ */
+export const CAMERA_CONSTRAINT_LEVELS = {
+  STRICT: 0,
+  LOOSE: 1,
+  MINIMAL: 2,
+  BASIC: 3,
+} as const;
+
+export type ConstraintLevel =
+  (typeof CAMERA_CONSTRAINT_LEVELS)[keyof typeof CAMERA_CONSTRAINT_LEVELS];
+
+const AUDIO_CONSTRAINTS = {
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true,
+};
+
+/**
+ * Build the constraints object for a given level.
+ * Returns the full MediaStreamConstraints to pass to getUserMedia.
+ */
+export function buildStreamConstraints(
+  facing: "environment" | "user",
+  level: ConstraintLevel,
+  zoom: number = 1,
+): MediaStreamConstraints {
+  const zoomConstraint = zoom > 1 ? { zoom: { ideal: zoom } } : {};
+
+  switch (level) {
+    case CAMERA_CONSTRAINT_LEVELS.STRICT:
+      return {
+        audio: AUDIO_CONSTRAINTS,
+        video: {
+          facingMode: { ideal: facing },
+          width: { min: 1920, ideal: 4096 },
+          height: { min: 1080, ideal: 3072 },
+          aspectRatio: { ideal: facing === "environment" ? 4 / 3 : 3 / 4 },
+          frameRate: { min: 24, ideal: 30, max: 60 },
+          resizeMode: "none" as const,
+          ...zoomConstraint,
+          advanced: [
+            { width: 4096, height: 3072 },
+            { width: 3840, height: 2160 },
+            { width: 3264, height: 2448 },
+            { width: 2560, height: 1920 },
+            { width: 1920, height: 1080 },
+          ] as MediaTrackConstraintSet[],
+        },
+      };
+
+    case CAMERA_CONSTRAINT_LEVELS.LOOSE:
+      // Drop min/aspect/frameRate.min — common rejection points on mid-range
+      // devices. Keep `ideal` and `advanced` ladder.
+      return {
+        audio: AUDIO_CONSTRAINTS,
+        video: {
+          facingMode: { ideal: facing },
+          width: { ideal: 4096 },
+          height: { ideal: 3072 },
+          frameRate: { ideal: 30, max: 60 },
+          resizeMode: "none" as const,
+          ...zoomConstraint,
+          advanced: [
+            { width: 4096, height: 3072 },
+            { width: 3840, height: 2160 },
+            { width: 3264, height: 2448 },
+            { width: 2560, height: 1920 },
+            { width: 1920, height: 1080 },
+          ] as MediaTrackConstraintSet[],
+        },
+      };
+
+    case CAMERA_CONSTRAINT_LEVELS.MINIMAL:
+      // Only ideal width/height + facing. No advanced, no aspect, no fps max.
+      // This matches what most basic PWA camera apps use.
+      return {
+        audio: AUDIO_CONSTRAINTS,
+        video: {
+          facingMode: { ideal: facing },
+          width: { ideal: 4096 },
+          height: { ideal: 3072 },
+          ...zoomConstraint,
+        },
+      };
+
+    case CAMERA_CONSTRAINT_LEVELS.BASIC:
+      // Last resort: just facing mode. Always works on any device with a
+      // camera — gives whatever default resolution the browser picks.
+      return {
+        audio: AUDIO_CONSTRAINTS,
+        video: {
+          facingMode: { ideal: facing },
+          ...zoomConstraint,
+        },
+      };
+  }
+}
+
+/**
+ * Open a camera stream with progressive constraint fallback.
  *
- * aspectRatio 4:3 matches most rear phone cameras natively (4032×3024 etc);
- * forcing 16:9 would crop the sensor and lose megapixels.
+ * Tries STRICT → LOOSE → MINIMAL → BASIC. The first that succeeds wins.
+ * If all fail, throws the last error (typically NotAllowedError or
+ * NotFoundError, which are not constraint-related).
+ *
+ * Returns the stream AND the level that succeeded (useful for logging
+ * and for adjusting downstream behavior — e.g. if we fell back to BASIC,
+ * we know not to bother trying upgradeStreamResolution).
+ */
+export async function openCameraStream(
+  facing: "environment" | "user",
+  zoom: number = 1,
+): Promise<{ stream: MediaStream; level: ConstraintLevel }> {
+  const levels: ConstraintLevel[] = [
+    CAMERA_CONSTRAINT_LEVELS.STRICT,
+    CAMERA_CONSTRAINT_LEVELS.LOOSE,
+    CAMERA_CONSTRAINT_LEVELS.MINIMAL,
+    CAMERA_CONSTRAINT_LEVELS.BASIC,
+  ];
+  let lastErr: unknown = null;
+  for (const level of levels) {
+    try {
+      const constraints = buildStreamConstraints(facing, level, zoom);
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      return { stream, level };
+    } catch (e) {
+      lastErr = e;
+      const err = e as DOMException;
+      // OverconstrainedError → try next softer level
+      if (err.name === "OverconstrainedError") {
+        console.warn(
+          `[camera] constraints level ${level} rejected (${err.message || err.constraint}),
+          falling back to level ${level + 1}`,
+        );
+        continue;
+      }
+      // NotAllowedError, NotFoundError, NotReadableError — these aren't
+      // constraint issues, no point retrying. Throw immediately.
+      throw e;
+    }
+  }
+  // All levels exhausted — throw the last error
+  throw lastErr;
+}
+
+/**
+ * @deprecated Use buildStreamConstraints + openCameraStream instead.
+ * Kept for backward compatibility with any code that imported this name.
  */
 export function getIdealStreamConstraints(
   facing: "environment" | "user",
   zoom: number = 1,
-) {
-  const zoomConstraint =
-    zoom > 1 ? { zoom: { ideal: zoom } } : {};
-  return {
-    audio: {
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-    },
-    video: {
-      facingMode: { ideal: facing },
-      width: { min: 1920, ideal: 4096 },
-      height: { min: 1080, ideal: 3072 },
-      aspectRatio: { ideal: facing === "environment" ? 4 / 3 : 3 / 4 },
-      frameRate: { min: 24, ideal: 30, max: 60 },
-      resizeMode: "none" as const,
-      ...zoomConstraint,
-      advanced: [
-        // Try 4K first (most rear cameras support this for stills),
-        // then 1080p HD as a safe fallback that all phones support.
-        { width: 4096, height: 3072 },
-        { width: 3840, height: 2160 },
-        { width: 3264, height: 2448 },
-        { width: 2560, height: 1920 },
-        { width: 1920, height: 1080 },
-      ] as MediaTrackConstraintSet[],
-    },
-  };
+): MediaStreamConstraints {
+  return buildStreamConstraints(facing, CAMERA_CONSTRAINT_LEVELS.LOOSE, zoom);
 }
 
 /**
@@ -57,6 +177,10 @@ export function getIdealStreamConstraints(
  * or 1280×720), try to upgrade by applying 4K constraints. This handles
  * the common Android behavior where the first request silently returns
  * a low-res stream.
+ *
+ * Safe to call after any constraint level — only attempts upgrade if
+ * current width < 1920. Errors are silently swallowed (we already have
+ * a working stream, no point breaking it).
  */
 export async function upgradeStreamResolution(
   stream: MediaStream,
