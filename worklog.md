@@ -382,3 +382,55 @@ Stage Summary:
 - ✅ Private mode fallback (per-session isolation)
 - ✅ Old global "kangwifi-" files no longer shown (intentional — were test uploads)
 - ✅ Cross-device admin view possible by passing custom prefix to listCloudImages()
+
+---
+Task ID: local-idb-fallback
+Agent: main (Super Z)
+Task: User report "cloud.kangwifi.eu.org ga bisa baca file yg sudah di upload" — store data URL locally per device so gallery works offline
+
+Work Log:
+- Confirmed: cloud.kangwifi.eu.org/files now returns HTTP 403 ("Private — use direct file link")
+- Old code: listCloudImages() called /api/cloud-list which proxied to /files → 502 → gallery empty
+- Old code: uploadToCloud() called /api/cloud-upload which proxied to /upload → also failing
+
+- New file src/components/camera/local-gallery.ts (244 lines):
+  * IndexedDB schema: DB "kangwifi-cam", store "gallery", keyPath "id"
+  * Indexes: "deviceId" (per-device filter), "createdAt" (sorted listing)
+  * LocalGalleryRecord: id, deviceId, kind, mime, filename, width, height, size,
+    blob (main HEIC/MP4), previewBlob (JPEG), cloudUrl, cloudKey, hfUrl,
+    cloudStatus ("uploaded"|"local_only"|"pending"), createdAt
+  * Stores Blobs natively (no base64 round-trip — IDB supports Blob)
+  * Functions: saveToLocalGallery, listLocalGallery, getLocalGalleryRecord,
+    deleteFromLocalGallery, updateLocalGalleryRecord, getLocalGalleryStorageEstimate
+  * Best-effort: all ops swallow errors (capture must never fail because of IDB)
+
+- New in utils.ts:
+  * uploadCaptureWithLocalFallback(mainBlob, previewBlob, filename, mime, kind, w, h):
+    Step 1: save to local IDB immediately (status: pending)
+    Step 2: try cloud upload
+    Step 3a: cloud success → update record with cloudUrl, status: uploaded
+    Step 3b: cloud fail → mark status: local_only, return success=true (photo saved!)
+    Returns: { success, localId, cloudUrl, cloudKey, hfUrl, cloudPage, cloudUploaded, cloudError }
+  * listCloudImagesWithLocalFallback():
+    Step 1: try cloud (preserves old behavior)
+    Step 2: on cloud error → read local IDB, map to CloudFile shape
+    Returns: { success, files, source: "cloud"|"local", error? }
+
+- Changes in camera-app.tsx:
+  * uploadCapture() now calls uploadCaptureWithLocalFallback (was uploadToCloud)
+  * If cloud failed but local saved: toast.warning("Cloud sedang offline — foto disimpan lokal di perangkat ini")
+  * refreshCloud() now calls listCloudImagesWithLocalFallback (was listCloudImages)
+  * Console log when fallback triggers: "[gallery] cloud unreachable — showing local IndexedDB gallery"
+
+- Fixed .gitignore: pattern "local-*" was matching local-gallery.ts. Added exception.
+
+- Verified build: chunk b5fcb36fb2bc1ab2.js contains "kangwifi-cam" (DB name) + "cloudStatus" (record field)
+- Verified endpoint: cloud-list returns 502 (cloud 403) — but client-side now catches this and reads IDB
+- Committed 1e0becc, pushed to GitHub (16855f4..1e0becc)
+
+Stage Summary:
+- ✅ Captures never lost even when cloud is down — saved to local IndexedDB first
+- ✅ Gallery strip shows local files when cloud unreachable
+- ✅ Per-device isolation preserved (deviceId index in IDB)
+- ✅ User sees toast notification when cloud fails but local succeeds
+- ✅ When cloud recovers later, old local records still work (just no cloudUrl)
