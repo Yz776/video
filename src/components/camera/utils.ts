@@ -407,8 +407,67 @@ export function isTouchDevice(): boolean {
 const CLOUD_PAGE_URL = "https://cloud.kangwifi.eu.org/";
 
 /**
+ * Get or create a stable device ID for this browser/device.
+ *
+ * Each device (browser profile) gets its own ID, persisted in localStorage.
+ * This is used as part of the cloud file prefix so each device only sees
+ * its own photos in the gallery — e.g. device "ab12cd34" uploads files
+ * named "kangwifi-ab12cd34-1735000000-photo.heic", and only requests
+ * files with prefix "kangwifi-ab12cd34-" when listing.
+ *
+ * The ID is 8 hex chars from crypto.getRandomValues — collision-resistant
+ * enough for this use case (birthday paradox at 4 billion devices).
+ * Stored under localStorage key "kangwifi-device-id".
+ *
+ * If localStorage is unavailable (private mode / disabled), falls back to
+ * a per-session random ID (gallery isolation still works within session).
+ */
+export function getDeviceId(): string {
+  const STORAGE_KEY = "kangwifi-device-id";
+
+  // Try to load existing ID from localStorage
+  try {
+    const existing = localStorage.getItem(STORAGE_KEY);
+    if (existing && /^[a-f0-9]{8}$/.test(existing)) {
+      return existing;
+    }
+  } catch {
+    // localStorage unavailable (private mode, disabled, etc.) — fall through
+  }
+
+  // Generate a new 8-char hex ID
+  const arr = new Uint8Array(4);
+  crypto.getRandomValues(arr);
+  const id = Array.from(arr)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+
+  // Try to persist (ignore failure — session-only ID is acceptable)
+  try {
+    localStorage.setItem(STORAGE_KEY, id);
+  } catch {
+    // ignore
+  }
+
+  return id;
+}
+
+/**
+ * Build the cloud file prefix for this device.
+ * Format: "kangwifi-{deviceId}-"
+ * All files uploaded from this device get this prefix, and listCloudImages
+ * filters by it so each device only sees its own gallery.
+ */
+export function getCloudPrefix(): string {
+  return `kangwifi-${getDeviceId()}-`;
+}
+
+/**
  * Upload a Blob (HEIC photo, MP4 video, etc.) to the kangwifi cloud.
  * Returns the public URL the file can be accessed from.
+ *
+ * Files are prefixed with "kangwifi-{deviceId}-" so each device's gallery
+ * stays isolated (see getDeviceId for details).
  */
 export async function uploadToCloud(
   blob: Blob,
@@ -426,10 +485,13 @@ export async function uploadToCloud(
   error?: string;
 }> {
   const fd = new FormData();
-  // Rename file to start with "kangwifi-" so we can filter later
-  const cloudName = filename.startsWith("kangwifi-")
+  const prefix = getCloudPrefix();
+  // Build the cloud file name: kangwifi-{deviceId}-{timestamp}-{original}
+  // If filename already starts with our device prefix (re-upload case),
+  // don't double-prefix.
+  const cloudName = filename.startsWith(prefix)
     ? filename
-    : `kangwifi-${Date.now()}-${filename}`;
+    : `${prefix}${Date.now()}-${filename}`;
   const file = new File([blob], cloudName, { type: mime });
   fd.append("file", file);
 
@@ -454,11 +516,14 @@ export async function uploadToCloud(
 }
 
 /**
- * List image files from the cloud. By default only files starting with
- * "kangwifi-" prefix are returned (so we don't show unrelated files).
+ * List image files from the cloud, scoped to THIS device's gallery.
+ *
+ * Uses the device-specific prefix "kangwifi-{deviceId}-" so each device
+ * only sees its own uploads. Pass a custom prefix only if you really
+ * need cross-device listing (e.g. admin view).
  */
 export async function listCloudImages(
-  prefix: string = "kangwifi-",
+  prefix: string = getCloudPrefix(),
 ): Promise<{ success: boolean; files?: CloudFile[]; error?: string }> {
   const url = `/api/cloud-list?prefix=${encodeURIComponent(prefix)}&images=1`;
   const res = await fetch(url, { cache: "no-store" });
