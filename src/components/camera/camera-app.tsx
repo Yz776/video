@@ -16,12 +16,10 @@ import {
   genId,
   openCameraStream,
   CAMERA_CONSTRAINT_LEVELS,
-  listCloudImages,
   listCloudImagesWithLocalFallback,
   pickRecorderMime,
   processToHeic,
   upgradeStreamResolution,
-  uploadToCloud,
   uploadCaptureWithLocalFallback,
 } from "./utils";
 import {
@@ -38,6 +36,7 @@ import {
   JustCapturedModal,
   type JustCapturedInfo,
 } from "./gallery";
+import type { CaptureKind } from "./local-gallery";
 import { cn } from "@/lib/utils";
 import {
   Aperture as ApertureIcon,
@@ -304,12 +303,15 @@ export function CameraApp() {
       try {
         // uploadCaptureWithLocalFallback always saves to IDB + tries cloud.
         // Returns success=true even if cloud failed (photo still saved locally).
+        // Map CameraMode → CaptureKind: burst/portrait are stored as "photo".
+        const storageKind: CaptureKind =
+          kind === "video" ? "video" : kind === "live" ? "live" : "photo";
         const result = await uploadCaptureWithLocalFallback(
           heicBlob,
           previewBlob,
           filename,
           mime,
-          kind,
+          storageKind,
           width,
           height,
         );
@@ -338,6 +340,7 @@ export function CameraApp() {
           cloudUrl: result.cloudUrl ?? undefined,
           cloudKey: result.cloudKey ?? undefined,
           hfUrl: result.hfUrl ?? undefined,
+          cloudUploaded: result.cloudUploaded,
           kind,
         };
 
@@ -428,11 +431,18 @@ export function CameraApp() {
 
         // If live photo: also upload the video clip
         if (clipBlob && info) {
-          // Fire-and-forget video upload — don't block the UI
+          // Fire-and-forget video upload — don't block the UI.
+          // Uses local fallback so the clip is never lost if cloud is down.
           const videoFilename = `kangwifi-${Date.now()}.live.webm`;
-          uploadToCloud(clipBlob, videoFilename, clipBlob.type || "video/webm")
+          uploadCaptureWithLocalFallback(
+            clipBlob,
+            null,
+            videoFilename,
+            clipBlob.type || "video/webm",
+            "video",
+          )
             .then((videoResult) => {
-              if (videoResult.success) {
+              if (videoResult.cloudUploaded) {
                 toast.success("Klip Live Photo terupload", {
                   description: "Video pendek menyertai foto HEIC",
                 });
@@ -443,9 +453,13 @@ export function CameraApp() {
 
         if (info) {
           setJustCaptured(info);
-          toast.success("Foto tersimpan di cloud", {
-            description: `${finalWidth}×${finalHeight} · super HD jernih`,
-          });
+          // Only show "tersimpan di cloud" toast if cloud actually succeeded;
+          // uploadCapture already showed a warning toast if cloud failed.
+          if (info.cloudUploaded) {
+            toast.success("Foto tersimpan di cloud", {
+              description: `${finalWidth}×${finalHeight} · super HD jernih`,
+            });
+          }
         }
       } catch (e) {
         console.error(e);
@@ -511,9 +525,15 @@ export function CameraApp() {
         setJustCaptured(lastInfo);
       }
       if (successCount > 0) {
-        toast.success(`Burst ${successCount}/5 terupload ke cloud`, {
-          description: "Semua sudah di-upscale + HEIC",
-        });
+        if (lastInfo?.cloudUploaded) {
+          toast.success(`Burst ${successCount}/5 terupload ke cloud`, {
+            description: "Semua sudah di-upscale + HEIC",
+          });
+        } else {
+          toast.warning(`Burst ${successCount}/5 tersimpan lokal`, {
+            description: "Cloud sedang offline — coba lagi nanti",
+          });
+        }
       } else {
         toast.error("Burst gagal total");
       }
@@ -582,9 +602,17 @@ export function CameraApp() {
         const filename = `kangwifi-${Date.now()}.video.${ext}`;
         setProcessing("Mengunggah video ke cloud…");
         try {
-          const result = await uploadToCloud(blob, filename, mime);
-          if (!result.success || !result.url) {
-            throw new Error(result.error ?? "Upload video gagal");
+          // Use unified upload with local fallback — same path as photos.
+          // If cloud fails, video is saved to local IDB so it's never lost.
+          const result = await uploadCaptureWithLocalFallback(
+            blob,
+            null, // videos have no previewBlob
+            filename,
+            mime,
+            "video",
+          );
+          if (!result.success) {
+            throw new Error(result.cloudError ?? "Upload video gagal");
           }
           const previewUrl = URL.createObjectURL(blob);
           const downloadUrl = previewUrl; // same URL — video previews from blob
@@ -593,20 +621,27 @@ export function CameraApp() {
             download: downloadUrl,
           };
           setJustCaptured({
-            id: genId(),
+            id: result.localId,
             previewUrl,
             downloadUrl,
             filename,
             mime,
             size: blob.size,
-            cloudUrl: result.url,
-            cloudKey: result.key,
-            hfUrl: result.hfUrl,
+            cloudUrl: result.cloudUrl ?? undefined,
+            cloudKey: result.cloudKey ?? undefined,
+            hfUrl: result.hfUrl ?? undefined,
+            cloudUploaded: result.cloudUploaded,
             kind: "video",
           });
-          toast.success("Video tersimpan di cloud", {
-            description: `${ext.toUpperCase()} · ${(blob.size / 1024 / 1024).toFixed(2)} MB`,
-          });
+          if (result.cloudUploaded) {
+            toast.success("Video tersimpan di cloud", {
+              description: `${ext.toUpperCase()} · ${(blob.size / 1024 / 1024).toFixed(2)} MB`,
+            });
+          } else {
+            toast.warning(
+              "Cloud sedang offline — video disimpan lokal di perangkat ini",
+            );
+          }
         } catch (e) {
           console.error(e);
           toast.error(e instanceof Error ? e.message : "Upload video gagal");

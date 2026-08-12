@@ -1,13 +1,15 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
 import type { CaptureItem, CloudFile } from "./types";
 import {
   formatBytes,
-  uploadToCloud,
-  listCloudImages,
+  listCloudImagesWithLocalFallback,
   deleteCloudFile,
+  getLocalBlobUrl,
+  isLocalFileUrl,
+  parseLocalFileId,
   CLOUD_URL,
 } from "./utils";
 import {
@@ -99,6 +101,65 @@ export function CloudStrip({
   );
 }
 
+/**
+ * Hook that resolves a CloudFile's display URL.
+ *
+ * For cloud files: returns file.url directly (a real https URL).
+ * For local-only files (url starts with "local:"): loads the previewBlob
+ * from IndexedDB and returns a blob: URL. The blob URL is revoked on
+ * unmount or when the file changes.
+ *
+ * Returns { url, loading } — caller should show a placeholder while loading.
+ */
+function useFileUrl(file: CloudFile): { url: string | null; loading: boolean } {
+  const [url, setUrl] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const blobUrlRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    // Revoke any previous blob URL
+    if (blobUrlRef.current) {
+      URL.revokeObjectURL(blobUrlRef.current);
+      blobUrlRef.current = null;
+    }
+    setLoading(true);
+    setUrl(null);
+
+    async function resolve() {
+      if (isLocalFileUrl(file.url)) {
+        const localId = parseLocalFileId(file.url);
+        if (!localId) {
+          if (!cancelled) setLoading(false);
+          return;
+        }
+        const blobUrl = await getLocalBlobUrl(localId, "preview");
+        if (cancelled) {
+          if (blobUrl) URL.revokeObjectURL(blobUrl);
+          return;
+        }
+        if (blobUrl) blobUrlRef.current = blobUrl;
+        setUrl(blobUrl);
+      } else {
+        setUrl(file.url);
+      }
+      setLoading(false);
+    }
+
+    resolve();
+
+    return () => {
+      cancelled = true;
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current);
+        blobUrlRef.current = null;
+      }
+    };
+  }, [file.url]);
+
+  return { url, loading };
+}
+
 function CloudStripThumb({
   file,
   onClick,
@@ -106,16 +167,18 @@ function CloudStripThumb({
   file: CloudFile;
   onClick: () => void;
 }) {
+  const { url, loading } = useFileUrl(file);
   const [err, setErr] = useState(false);
   const isHeic = /\.heic?$/i.test(file.name) || file.mime === "image/heic";
   const isVideo = /^video\//i.test(file.mime ?? "") || /\.(webm|mp4|mov)$/i.test(file.name);
+  const isLocal = isLocalFileUrl(file.url);
   return (
     <button
       onClick={onClick}
       className="relative size-12 rounded-lg overflow-hidden flex-shrink-0 border border-white/20 active:scale-95 transition-transform bg-zinc-900"
       aria-label={file.name}
     >
-      {isHeic || err || isVideo ? (
+      {isHeic || err || isVideo || loading || !url ? (
         <div className="size-full flex items-center justify-center">
           {isVideo ? (
             <Play className="size-4 text-white fill-white" />
@@ -125,14 +188,20 @@ function CloudStripThumb({
         </div>
       ) : (
         <img
-          src={file.url}
+          src={url}
           alt={file.name}
           loading="lazy"
           className="size-full object-cover"
           onError={() => setErr(true)}
         />
       )}
-      <span className="absolute top-0.5 right-0.5 size-2 rounded-full bg-sky-400 shadow-[0_0_4px_rgba(56,189,248,0.8)]" />
+      <span
+        className={cn(
+          "absolute top-0.5 right-0.5 size-2 rounded-full shadow-[0_0_4px_rgba(56,189,248,0.8)]",
+          isLocal ? "bg-amber-400" : "bg-sky-400",
+        )}
+        title={isLocal ? "Tersimpan lokal" : "Tersimpan di cloud"}
+      />
     </button>
   );
 }
@@ -155,9 +224,12 @@ export interface JustCapturedInfo {
   width?: number;
   height?: number;
   size: number;
-  cloudUrl: string;
+  /** Public cloud URL — undefined when cloud upload failed (local-only). */
+  cloudUrl?: string;
   cloudKey?: string;
   hfUrl?: string | null;
+  /** True if cloud upload succeeded; false if local-only. */
+  cloudUploaded: boolean;
   kind: CaptureItem["kind"];
   burstCount?: number;
 }
@@ -211,6 +283,7 @@ export function JustCapturedModal({
   };
 
   const handleCopyLink = async () => {
+    if (!info.cloudUrl) return;
     try {
       await navigator.clipboard.writeText(info.cloudUrl);
       setCopied(true);
@@ -221,6 +294,11 @@ export function JustCapturedModal({
   };
 
   const handleShareLink = async () => {
+    if (!info.cloudUrl) {
+      // No cloud link — fall back to sharing the file directly
+      handleShareFile();
+      return;
+    }
     if (navigator.share) {
       try {
         await navigator.share({
@@ -236,6 +314,8 @@ export function JustCapturedModal({
     }
   };
 
+  const isCloudUploaded = info.cloudUploaded && !!info.cloudUrl;
+
   return (
     <div className="fixed inset-0 z-[60] bg-black flex flex-col">
       {/* Top bar */}
@@ -248,10 +328,17 @@ export function JustCapturedModal({
           <X className="size-5 text-white" />
         </button>
         <div className="text-center">
-          <div className="text-xs font-bold text-sky-300 flex items-center gap-1 justify-center">
-            <Check className="size-3.5" />
-            Tersimpan di Cloud
-          </div>
+          {isCloudUploaded ? (
+            <div className="text-xs font-bold text-sky-300 flex items-center gap-1 justify-center">
+              <Check className="size-3.5" />
+              Tersimpan di Cloud
+            </div>
+          ) : (
+            <div className="text-xs font-bold text-amber-300 flex items-center gap-1 justify-center">
+              <Check className="size-3.5" />
+              Tersimpan Lokal
+            </div>
+          )}
           <div className="text-[11px] text-white/40">
             {info.width && info.height
               ? `${info.width}×${info.height} · ${formatBytes(info.size)}`
@@ -260,10 +347,13 @@ export function JustCapturedModal({
         </div>
         <button
           onClick={onOpenCloud}
-          className="size-10 rounded-full bg-sky-500/20 flex items-center justify-center"
-          aria-label="Open cloud gallery"
+          className={cn(
+            "size-10 rounded-full flex items-center justify-center",
+            isCloudUploaded ? "bg-sky-500/20" : "bg-amber-500/20",
+          )}
+          aria-label="Open gallery"
         >
-          <Cloud className="size-5 text-sky-300" />
+          <Cloud className={cn("size-5", isCloudUploaded ? "text-sky-300" : "text-amber-300")} />
         </button>
       </div>
 
@@ -283,54 +373,70 @@ export function JustCapturedModal({
         )}
       </div>
 
-      {/* Cloud URL panel */}
-      <div className="px-4 py-3 bg-sky-950/60 border-t border-sky-800/50 backdrop-blur-md">
-        <div className="max-w-md mx-auto space-y-2">
-          <div className="flex items-center gap-2 text-sky-300 text-xs font-bold">
-            <Check className="size-4" />
-            Berhasil di-upload ke cloud
-          </div>
-          <div className="flex items-center gap-1.5">
-            <input
-              readOnly
-              value={info.cloudUrl}
-              className="flex-1 px-2.5 py-1.5 bg-black/40 rounded-lg text-[11px] text-white/90 font-mono border border-sky-800/50"
-            />
-            <button
-              onClick={handleCopyLink}
-              className="size-8 rounded-lg bg-sky-500/20 text-sky-300 flex items-center justify-center active:scale-95"
-              aria-label="Copy link"
-            >
-              {copied ? <Check className="size-4" /> : <Link2 className="size-4" />}
-            </button>
+      {/* Cloud URL panel — only show when cloud upload succeeded */}
+      {isCloudUploaded ? (
+        <div className="px-4 py-3 bg-sky-950/60 border-t border-sky-800/50 backdrop-blur-md">
+          <div className="max-w-md mx-auto space-y-2">
+            <div className="flex items-center gap-2 text-sky-300 text-xs font-bold">
+              <Check className="size-4" />
+              Berhasil di-upload ke cloud
+            </div>
+            <div className="flex items-center gap-1.5">
+              <input
+                readOnly
+                value={info.cloudUrl}
+                className="flex-1 px-2.5 py-1.5 bg-black/40 rounded-lg text-[11px] text-white/90 font-mono border border-sky-800/50"
+              />
+              <button
+                onClick={handleCopyLink}
+                className="size-8 rounded-lg bg-sky-500/20 text-sky-300 flex items-center justify-center active:scale-95"
+                aria-label="Copy link"
+              >
+                {copied ? <Check className="size-4" /> : <Link2 className="size-4" />}
+              </button>
+              <a
+                href={info.cloudUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="size-8 rounded-lg bg-sky-500/20 text-sky-300 flex items-center justify-center active:scale-95"
+                aria-label="Open in new tab"
+              >
+                <ExternalLink className="size-4" />
+              </a>
+              <button
+                onClick={handleShareLink}
+                className="size-8 rounded-lg bg-sky-500/20 text-sky-300 flex items-center justify-center active:scale-95"
+                aria-label="Share link"
+              >
+                <Share2 className="size-4" />
+              </button>
+            </div>
             <a
-              href={info.cloudUrl}
+              href={CLOUD_URL}
               target="_blank"
               rel="noopener noreferrer"
-              className="size-8 rounded-lg bg-sky-500/20 text-sky-300 flex items-center justify-center active:scale-95"
-              aria-label="Open in new tab"
+              className="text-[10px] text-sky-400/70 hover:text-sky-300 inline-flex items-center gap-1"
             >
-              <ExternalLink className="size-4" />
+              <Cloud className="size-3" />
+              Buka cloud.kangwifi.eu.org
             </a>
-            <button
-              onClick={handleShareLink}
-              className="size-8 rounded-lg bg-sky-500/20 text-sky-300 flex items-center justify-center active:scale-95"
-              aria-label="Share link"
-            >
-              <Share2 className="size-4" />
-            </button>
           </div>
-          <a
-            href={CLOUD_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-[10px] text-sky-400/70 hover:text-sky-300 inline-flex items-center gap-1"
-          >
-            <Cloud className="size-3" />
-            Buka cloud.kangwifi.eu.org
-          </a>
         </div>
-      </div>
+      ) : (
+        // Local-only panel — shown when cloud upload failed
+        <div className="px-4 py-3 bg-amber-950/60 border-t border-amber-800/50 backdrop-blur-md">
+          <div className="max-w-md mx-auto space-y-2">
+            <div className="flex items-center gap-2 text-amber-300 text-xs font-bold">
+              <Cloud className="size-4" />
+              Cloud sedang offline
+            </div>
+            <p className="text-[11px] text-amber-200/80 leading-relaxed">
+              Foto disimpan lokal di perangkat ini. Tetap bisa diunduh atau
+              dibagikan. Akan otomatis tersinkron ke cloud saat koneksi pulih.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Bottom actions */}
       <div className="px-6 pt-4 pb-[max(env(safe-area-inset-bottom),2rem)] bg-gradient-to-t from-black/80 to-transparent">
@@ -408,13 +514,19 @@ export function CloudGallery({ open, onClose }: CloudGalleryProps) {
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const result = await listCloudImages();
+    const result = await listCloudImagesWithLocalFallback();
     setLoading(false);
     if (!result.success || !result.files) {
       setError(result.error ?? "Gagal memuat cloud");
       return;
     }
     setFiles(result.files);
+    if (result.source === "local") {
+      console.info(
+        "[gallery] cloud unreachable — showing local IndexedDB gallery",
+        result.error ? `(${result.error})` : "",
+      );
+    }
   }, []);
 
   useEffect(() => {
@@ -532,19 +644,29 @@ function CloudThumb({
   file: CloudFile;
   onClick: () => void;
 }) {
+  const { url, loading } = useFileUrl(file);
   const [err, setErr] = useState(false);
-  // HEIC files can't be rendered in <img>, so we just show an icon
+  // HEIC files can't be rendered in <img>, so we just show an icon.
+  // But local HEIC records DO have a previewBlob (JPEG) — so we can still
+  // render a thumbnail via the useFileUrl hook (which uses previewBlob).
+  // Only treat as "no-preview HEIC" when it's a cloud HEIC (no preview URL).
   const isHeic = /\.heic?$/i.test(file.name) || file.mime === "image/heic";
   const isVideo = /^video\//i.test(file.mime ?? "") || /\.(webm|mp4|mov)$/i.test(file.name);
+  const isLocal = isLocalFileUrl(file.url);
+  // For local HEIC files, we DO have a JPEG preview via useFileUrl.
+  // For cloud HEIC files, we can't render them in <img>.
+  const showHeicIcon = isHeic && !isLocal;
   return (
     <button
       onClick={onClick}
       className="relative aspect-square rounded-lg overflow-hidden bg-zinc-900 border border-white/10 active:scale-95 transition-transform"
     >
-      {isHeic || isVideo || err ? (
+      {showHeicIcon || isVideo || err || loading || !url ? (
         <div className="size-full flex flex-col items-center justify-center p-1">
           {isVideo ? (
             <Play className="size-6 text-white fill-white" />
+          ) : loading ? (
+            <Loader2 className="size-5 text-white/40 animate-spin" />
           ) : (
             <Aperture className="size-6 text-amber-300" />
           )}
@@ -554,16 +676,21 @@ function CloudThumb({
         </div>
       ) : (
         <img
-          src={file.url}
+          src={url}
           alt={file.name}
           loading="lazy"
           className="size-full object-cover"
           onError={() => setErr(true)}
         />
       )}
-      {file.status === "cloud" && (
+      {file.status === "cloud" && !isLocal && (
         <span className="absolute top-1 left-1 px-1 rounded bg-emerald-500/80 text-[7px] font-bold text-white">
           HF
+        </span>
+      )}
+      {isLocal && (
+        <span className="absolute top-1 left-1 px-1 rounded bg-amber-500/80 text-[7px] font-bold text-white">
+          LOKAL
         </span>
       )}
       <span className="absolute bottom-0 inset-x-0 px-1 py-0.5 bg-black/60 text-[8px] text-white/80 truncate text-center">
@@ -589,12 +716,84 @@ function CloudFileDetail({
 }) {
   const isHeic = /\.heic?$/i.test(file.name) || file.mime === "image/heic";
   const isVideo = /^video\//i.test(file.mime ?? "") || /\.(webm|mp4|mov)$/i.test(file.name);
+  const isLocal = isLocalFileUrl(file.url);
   const [copied, setCopied] = useState(false);
+  const [fullUrl, setFullUrl] = useState<string | null>(null);
+  const [fullLoading, setFullLoading] = useState(true);
+  const fullUrlRef = useRef<string | null>(null);
+
+  // Load the full-blob URL for preview & download. For cloud files,
+  // this is just file.url. For local files, we fetch the full blob from IDB.
+  useEffect(() => {
+    let cancelled = false;
+    if (fullUrlRef.current) {
+      URL.revokeObjectURL(fullUrlRef.current);
+      fullUrlRef.current = null;
+    }
+    setFullLoading(true);
+    setFullUrl(null);
+
+    async function resolveFull() {
+      if (isLocal) {
+        const localId = parseLocalFileId(file.url);
+        if (!localId) {
+          if (!cancelled) setFullLoading(false);
+          return;
+        }
+        const blobUrl = await getLocalBlobUrl(localId, "full");
+        if (cancelled) {
+          if (blobUrl) URL.revokeObjectURL(blobUrl);
+          return;
+        }
+        if (blobUrl) fullUrlRef.current = blobUrl;
+        setFullUrl(blobUrl);
+      } else {
+        setFullUrl(file.url);
+      }
+      setFullLoading(false);
+    }
+
+    resolveFull();
+
+    return () => {
+      cancelled = true;
+      if (fullUrlRef.current) {
+        URL.revokeObjectURL(fullUrlRef.current);
+        fullUrlRef.current = null;
+      }
+    };
+  }, [file.url, isLocal]);
 
   const copy = async () => {
     await onCopyUrl();
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
+  };
+
+  const handleDownload = () => {
+    if (!fullUrl) return;
+    const a = document.createElement("a");
+    a.href = fullUrl;
+    a.download = file.name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  const handleShare = async () => {
+    if (!fullUrl) return;
+    try {
+      const res = await fetch(fullUrl);
+      const blob = await res.blob();
+      const f = new File([blob], file.name, { type: file.mime ?? "application/octet-stream" });
+      if (navigator.canShare && navigator.canShare({ files: [f] })) {
+        await navigator.share({ files: [f], title: "kangwifi cam" });
+      } else {
+        handleDownload();
+      }
+    } catch {
+      // user cancelled
+    }
   };
 
   return (
@@ -625,14 +824,20 @@ function CloudFileDetail({
       </div>
 
       <div className="flex-1 flex items-center justify-center px-4">
-        {isVideo ? (
+        {fullLoading ? (
+          <div className="flex items-center gap-2 text-white/60 text-sm">
+            <Loader2 className="size-5 animate-spin" />
+            Memuat…
+          </div>
+        ) : isVideo ? (
           <video
-            src={file.url}
+            src={fullUrl ?? undefined}
             className="max-w-full max-h-full rounded-lg"
             controls
             playsInline
           />
-        ) : isHeic ? (
+        ) : isHeic && !isLocal ? (
+          // Cloud HEIC files can't be previewed in browser <img>
           <div className="text-center space-y-3">
             <div className="size-24 mx-auto rounded-2xl bg-zinc-900 flex items-center justify-center">
               <Aperture className="size-10 text-amber-300" />
@@ -646,7 +851,7 @@ function CloudFileDetail({
           </div>
         ) : (
           <img
-            src={file.url}
+            src={fullUrl ?? undefined}
             alt={file.name}
             className="max-w-full max-h-full object-contain rounded-lg"
           />
@@ -654,37 +859,62 @@ function CloudFileDetail({
       </div>
 
       <div className="px-4 py-3 bg-zinc-950/80 border-t border-zinc-800 space-y-2">
-        <div className="flex items-center gap-1.5">
-          <input
-            readOnly
-            value={file.url}
-            className="flex-1 px-2.5 py-1.5 bg-black/40 rounded-lg text-[11px] text-white/90 font-mono border border-zinc-700"
-          />
-          <button
-            onClick={copy}
-            className="size-8 rounded-lg bg-sky-500/20 text-sky-300 flex items-center justify-center"
-            aria-label="Copy link"
-          >
-            {copied ? <Check className="size-4" /> : <Link2 className="size-4" />}
-          </button>
-          <a
-            href={file.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="size-8 rounded-lg bg-sky-500/20 text-sky-300 flex items-center justify-center"
-            aria-label="Open in new tab"
-          >
-            <ExternalLink className="size-4" />
-          </a>
-          <a
-            href={file.url}
-            download={file.name}
-            className="size-8 rounded-lg bg-amber-300/20 text-amber-300 flex items-center justify-center"
-            aria-label="Download"
-          >
-            <Download className="size-4" />
-          </a>
-        </div>
+        {isLocal ? (
+          // Local-only file: no public URL — show download/share instead
+          <div className="flex items-center gap-2">
+            <div className="flex-1 px-2.5 py-1.5 bg-amber-500/10 rounded-lg text-[11px] text-amber-300 font-mono border border-amber-800/50 truncate">
+              Tersimpan lokal di perangkat ini
+            </div>
+            <button
+              onClick={handleShare}
+              disabled={!fullUrl}
+              className="size-8 rounded-lg bg-sky-500/20 text-sky-300 flex items-center justify-center disabled:opacity-50"
+              aria-label="Share"
+            >
+              <Share2 className="size-4" />
+            </button>
+            <button
+              onClick={handleDownload}
+              disabled={!fullUrl}
+              className="size-8 rounded-lg bg-amber-300/20 text-amber-300 flex items-center justify-center disabled:opacity-50"
+              aria-label="Download"
+            >
+              <Download className="size-4" />
+            </button>
+          </div>
+        ) : (
+          // Cloud file: show URL + copy/open/download
+          <div className="flex items-center gap-1.5">
+            <input
+              readOnly
+              value={file.url}
+              className="flex-1 px-2.5 py-1.5 bg-black/40 rounded-lg text-[11px] text-white/90 font-mono border border-zinc-700"
+            />
+            <button
+              onClick={copy}
+              className="size-8 rounded-lg bg-sky-500/20 text-sky-300 flex items-center justify-center"
+              aria-label="Copy link"
+            >
+              {copied ? <Check className="size-4" /> : <Link2 className="size-4" />}
+            </button>
+            <a
+              href={file.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="size-8 rounded-lg bg-sky-500/20 text-sky-300 flex items-center justify-center"
+              aria-label="Open in new tab"
+            >
+              <ExternalLink className="size-4" />
+            </a>
+            <button
+              onClick={handleDownload}
+              className="size-8 rounded-lg bg-amber-300/20 text-amber-300 flex items-center justify-center"
+              aria-label="Download"
+            >
+              <Download className="size-4" />
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

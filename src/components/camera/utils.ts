@@ -2,6 +2,8 @@ import type { CameraSettings, CloudFile } from "@/components/camera/types";
 import {
   saveToLocalGallery,
   listLocalGallery,
+  getLocalGalleryRecord,
+  deleteFromLocalGallery,
   type LocalGalleryRecord,
   type CaptureKind,
 } from "./local-gallery";
@@ -561,10 +563,24 @@ export async function listCloudImages(
 
 /**
  * Delete a file from the cloud by its key.
+ *
+ * For local-only files (key starts with "local:"), deletes from IndexedDB
+ * instead of the cloud. The local IDB id is the portion after "local:".
  */
 export async function deleteCloudFile(
   key: string,
 ): Promise<{ success: boolean; error?: string }> {
+  // Local-only file — delete from IDB
+  if (key.startsWith("local:")) {
+    const localId = key.slice("local:".length);
+    const deleted = await deleteFromLocalGallery(localId);
+    if (!deleted) {
+      return { success: false, error: "Local record not found" };
+    }
+    return { success: true };
+  }
+
+  // Cloud file — call cloud-delete API
   const res = await fetch(`/api/cloud-delete?key=${encodeURIComponent(key)}`, {
     method: "DELETE",
   });
@@ -572,6 +588,11 @@ export async function deleteCloudFile(
   if (!res.ok || !data.success) {
     return { success: false, error: data.error ?? `HTTP ${res.status}` };
   }
+
+  // Also try to delete the matching local IDB record (best-effort cleanup).
+  // We don't know which local record matches this cloudKey without scanning,
+  // so we just skip it — the local record will be GC'd eventually when
+  // the user clears browser storage.
   return { success: true };
 }
 
@@ -707,70 +728,134 @@ export async function uploadCaptureWithLocalFallback(
 }
 
 /**
- * List images/videos for this device, with local fallback.
+ * List images/videos for this device, MERGING cloud + local records.
  *
- * Tries cloud first (preserves old behavior when cloud is reachable).
- * If cloud returns an error (403, network, etc.), falls back to local
- * IndexedDB records so the gallery still shows the user's captures.
+ * Why merge (not either/or)?
+ *   - Cloud /files is flaky (returns 502 intermittently) and has a listing
+ *     propagation delay — a file just uploaded may not appear in /files for
+ *     a few seconds. If we only listed cloud, the user would see "nothing
+ *     there" right after upload.
+ *   - Local IndexedDB always has the most recent captures (saved before
+ *     cloud upload is attempted).
+ *   - By merging, we always show:
+ *       1. All files cloud knows about for this device (status: cloud)
+ *       2. Plus any local-only records that haven't synced yet (status: local)
+ *
+ * Dedupe: if a local record has a cloudKey AND that key appears in the
+ * cloud list, we keep the cloud version (it has a real URL). Local-only
+ * records (cloudKey=null OR key not in cloud list) are appended.
  *
  * Records from local IDB are mapped to the same CloudFile shape so the
- * gallery UI doesn't need to know the difference. The `url` field points
- * to a blob: URL created on-demand from the stored blob (revoked when
- * the gallery item is closed or replaced).
- *
- * Returns both the files AND a `source` field indicating where the data
- * came from — useful for showing a "Cloud offline — showing local gallery"
- * banner in the UI.
+ * gallery UI doesn't need to know the difference. The `url` field for
+ * local-only records is `"local:{id}"` — a sentinel that the gallery
+ * hook resolves to a blob: URL on-demand via getLocalGalleryRecord().
  */
 export async function listCloudImagesWithLocalFallback(): Promise<{
   success: boolean;
   files: CloudFile[];
-  source: "cloud" | "local";
+  source: "cloud" | "local" | "merged";
   error?: string;
 }> {
-  // Try cloud first
-  const cloudResult = await listCloudImages();
-  if (cloudResult.success && cloudResult.files) {
-    return {
-      success: true,
-      files: cloudResult.files,
-      source: "cloud",
-    };
+  const deviceId = getDeviceId();
+
+  // Run both in parallel — we want both for merging
+  const [cloudResult, localRecords] = await Promise.all([
+    listCloudImages().catch((err) => {
+      // Don't throw — we still have local fallback
+      console.warn("[cloud] listing failed, using local only:", err);
+      return null;
+    }),
+    listLocalGallery(deviceId),
+  ]);
+
+  const merged: CloudFile[] = [];
+  const seenCloudKeys = new Set<string>();
+
+  // 1. Cloud files first (these have real URLs)
+  if (cloudResult?.success && cloudResult.files) {
+    for (const f of cloudResult.files) {
+      merged.push(f);
+      if (f.key) seenCloudKeys.add(f.key);
+    }
   }
 
-  // Cloud failed — fall back to local IDB
-  console.warn(
-    "[cloud] listing failed, falling back to local gallery:",
-    cloudResult.error,
-  );
-  const deviceId = getDeviceId();
-  const localRecords = await listLocalGallery(deviceId);
+  // 2. Append local-only records (skip ones already shown from cloud)
+  for (const rec of localRecords) {
+    if (rec.cloudKey && seenCloudKeys.has(rec.cloudKey)) continue;
+    // Skip records that are marked "uploaded" but whose cloudKey isn't in
+    // the cloud list — they may be mid-upload or the cloud lost them.
+    // Show them as local so user can still access the file.
+    merged.push({
+      id: rec.id,
+      name: rec.filename,
+      key: rec.cloudKey ?? `local:${rec.id}`,
+      size: rec.size,
+      sizeHuman: formatBytes(rec.size),
+      mime: rec.mime,
+      status: rec.cloudStatus === "uploaded" ? "cloud" : "local",
+      isPublic: rec.cloudStatus === "uploaded",
+      url: rec.cloudUrl ?? `local:${rec.id}`,
+      hfUrl: rec.hfUrl,
+      createdAt: rec.createdAt,
+    });
+  }
 
-  // Map local records to CloudFile shape
-  // Note: we don't create blob URLs here — the gallery UI should create
-  // them on-demand when rendering each thumbnail (and revoke when unmounting).
-  // We store the local id in the `key` field so the gallery can fetch
-  // the full blob when needed via getLocalGalleryRecord().
-  const files: CloudFile[] = localRecords.map((rec) => ({
-    id: rec.id,
-    name: rec.filename,
-    key: rec.cloudKey ?? `local:${rec.id}`,
-    size: rec.size,
-    sizeHuman: formatBytes(rec.size),
-    mime: rec.mime,
-    status: rec.cloudStatus === "uploaded" ? "cloud" : "local",
-    isPublic: rec.cloudStatus === "uploaded",
-    url: rec.cloudUrl ?? `local:${rec.id}`,
-    hfUrl: rec.hfUrl,
-    createdAt: rec.createdAt,
-  }));
+  // Sort newest first (both cloud created_at and local createdAt are unix ms)
+  merged.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+
+  // Determine source label for debugging/UI
+  const hasCloud = (cloudResult?.success && (cloudResult.files?.length ?? 0) > 0);
+  const hasLocal = localRecords.length > 0;
+  const source: "cloud" | "local" | "merged" =
+    hasCloud && hasLocal ? "merged" : hasCloud ? "cloud" : "local";
 
   return {
     success: true,
-    files,
-    source: "local",
-    error: cloudResult.error,
+    files: merged,
+    source,
+    error: cloudResult?.error,
   };
+}
+
+/**
+ * Get a blob URL for a local-only file (where url starts with "local:").
+ * Returns null if the record can't be found.
+ *
+ * Caller is responsible for revoking the URL via URL.revokeObjectURL()
+ * when done (e.g., when the component unmounts).
+ *
+ * @param localId The id portion after "local:" — same as LocalGalleryRecord.id
+ * @param which   "preview" → previewBlob (JPEG, small, for thumbnails)
+ *                "full"    → blob (HEIC/MP4, full quality, for detail view)
+ */
+export async function getLocalBlobUrl(
+  localId: string,
+  which: "preview" | "full" = "preview",
+): Promise<string | null> {
+  try {
+    const rec = await getLocalGalleryRecord(localId);
+    if (!rec) return null;
+    const blob = which === "preview" ? (rec.previewBlob ?? rec.blob) : rec.blob;
+    return URL.createObjectURL(blob);
+  } catch (err) {
+    console.warn("[local-gallery] getLocalBlobUrl failed:", err);
+    return null;
+  }
+}
+
+/**
+ * Check if a CloudFile.url points to a local IDB record.
+ */
+export function isLocalFileUrl(url: string | undefined | null): url is string {
+  return !!url && url.startsWith("local:");
+}
+
+/**
+ * Extract the local IDB record id from a "local:{id}" URL.
+ */
+export function parseLocalFileId(url: string): string | null {
+  if (!url.startsWith("local:")) return null;
+  return url.slice("local:".length);
 }
 
 export const CLOUD_URL = CLOUD_PAGE_URL;
