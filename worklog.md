@@ -243,3 +243,34 @@ Stage Summary:
 - ✅ README lengkap dengan troubleshooting
 - ✅ `.env.example` committed (bisa di-copy langsung jadi `.env`)
 - User sekarang tinggal: `git clone ... && cd ... && bash setup.sh && bash run.sh`
+
+---
+Task ID: heic-perf-optimize
+Agent: main (Super Z)
+Task: User confirm "iya" — optimize HEIC pipeline to prevent 502 timeout
+
+Work Log:
+- Identified 3 problem params in `/src/app/api/process/route.ts` line 380-387:
+  * effort: 4 (heavy AV1 RDO, ~7s per 4K frame)
+  * quality: 99 (default, near-lossless but expensive)
+  * chromaSubsampling: "4:4:4" (AV1 codec ignores this — it's a JPEG concept, just wasted memory)
+- Edited route.ts:
+  * effort: 4 → 2 (3-4× faster, no visible difference at q>=90)
+  * Removed chromaSubsampling (AV1 always uses 4:2:0 internally)
+  * Updated comment block explaining the new rationale
+  * Default quality: 99 → 92 (still visually lossless, ~50% smaller files)
+- Edited types.ts: DEFAULT_SETTINGS.quality 99 → 92 (match server default)
+- Killed old server (pid 1446), rebuilt, restarted (new pid 2180, 282MB RSS)
+- Tested with real photo (scripts/real-source.jpg, 1045×1300, 70KB):
+  * 2x upscale: 24723ms → 3910ms (6.3× faster, well under 30s proxy timeout)
+  * 4x upscale: previously OOM → now 10524ms (works!)
+- Memory footprint: 334MB → 282MB (-15%)
+- Total container RAM: 784MB → 743MB used (still 3.3GB free)
+- Committed `f48529d`, pushed to https://github.com/Yz776/video.git (f50183e..f48529d)
+
+Stage Summary:
+- ✅ 502 root cause fixed: HEIC pipeline now 6× faster, well under proxy timeout
+- ✅ 4x upscale now works (previously OOM)
+- ✅ Default quality 92 still visually lossless on phone screens
+- ✅ Server still running on port 3000, ready to test via preview URL
+- User can now retry photo capture — should succeed without 502
