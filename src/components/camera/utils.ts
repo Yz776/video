@@ -1,4 +1,10 @@
 import type { CameraSettings, CloudFile } from "@/components/camera/types";
+import {
+  saveToLocalGallery,
+  listLocalGallery,
+  type LocalGalleryRecord,
+  type CaptureKind,
+} from "./local-gallery";
 
 /**
  * Camera constraint ladder.
@@ -385,7 +391,8 @@ export function pickRecorderMime(): { mime: string; ext: "webm" | "mp4" } {
 export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / 1024 / 1024).toFixed(2)} MB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(2)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
 export function genId(): string {
@@ -566,6 +573,204 @@ export async function deleteCloudFile(
     return { success: false, error: data.error ?? `HTTP ${res.status}` };
   }
   return { success: true };
+}
+
+// ============================================================
+// LOCAL FALLBACK — IndexedDB-backed per-device gallery
+// ============================================================
+//
+// When cloud.kangwifi.eu.org is unreachable (403, network error, etc.),
+// captures are still saved to IndexedDB so the user never loses photos.
+// listCloudImages() falls back to local IDB when cloud listing fails.
+
+/**
+ * Result of uploadCaptureWithLocalFallback — unified shape whether
+ * the cloud upload succeeded or failed.
+ */
+export interface CaptureStorageResult {
+  success: boolean;
+  /** Local IDB record id (uuid) — used for later cloud retry / delete */
+  localId: string;
+  /** Public cloud URL if upload succeeded, null otherwise */
+  cloudUrl: string | null;
+  /** Cloud file key if upload succeeded, null otherwise */
+  cloudKey: string | null;
+  /** HuggingFace mirror URL if available, null otherwise */
+  hfUrl: string | null;
+  /** Cloud page URL (https://cloud.kangwifi.eu.org/) for "open in cloud" link */
+  cloudPage: string;
+  /** True if cloud upload succeeded, false if local-only */
+  cloudUploaded: boolean;
+  /** Error message if cloud upload failed (still succeeded locally) */
+  cloudError?: string;
+  /** Original filename passed in */
+  filename: string;
+  /** Original mime passed in */
+  mime: string;
+}
+
+/**
+ * Upload a capture to cloud AND save to local IndexedDB.
+ *
+ * Behavior:
+ *   1. Save to local IDB immediately (best-effort, never throws)
+ *   2. Try cloud upload
+ *   3. If cloud succeeds → update local record with cloudUrl + mark "uploaded"
+ *   4. If cloud fails → leave local record as "local_only", return success=true
+ *
+ * This means the user's capture is NEVER lost — even if cloud is down,
+ * the photo is in local IDB and will appear in the gallery.
+ *
+ * @param mainBlob   The main file (HEIC photo blob or MP4 video blob)
+ * @param previewBlob JPEG preview blob (photos only, null for videos)
+ * @param filename   Original filename (without device prefix)
+ * @param mime       Mime type
+ * @param kind       "photo" | "video" | "live"
+ * @param width      Pixel width (optional)
+ * @param height     Pixel height (optional)
+ */
+export async function uploadCaptureWithLocalFallback(
+  mainBlob: Blob,
+  previewBlob: Blob | null,
+  filename: string,
+  mime: string,
+  kind: CaptureKind,
+  width?: number,
+  height?: number,
+): Promise<CaptureStorageResult> {
+  const deviceId = getDeviceId();
+  const localId = genId();
+  const createdAt = Date.now();
+
+  // Step 1: Save to local IDB immediately (status: pending)
+  const record: LocalGalleryRecord = {
+    id: localId,
+    deviceId,
+    kind,
+    mime,
+    filename,
+    width,
+    height,
+    size: mainBlob.size,
+    blob: mainBlob,
+    previewBlob,
+    cloudUrl: null,
+    cloudKey: null,
+    hfUrl: null,
+    cloudStatus: "pending",
+    createdAt,
+  };
+  await saveToLocalGallery(record);
+
+  // Step 2: Try cloud upload
+  const uploadResult = await uploadToCloud(mainBlob, filename, mime);
+
+  if (uploadResult.success && uploadResult.url) {
+    // Step 3: Cloud succeeded — update local record
+    await saveToLocalGallery({
+      ...record,
+      cloudUrl: uploadResult.url,
+      cloudKey: uploadResult.key ?? null,
+      hfUrl: uploadResult.hfUrl ?? null,
+      cloudStatus: "uploaded",
+    });
+    return {
+      success: true,
+      localId,
+      cloudUrl: uploadResult.url,
+      cloudKey: uploadResult.key ?? null,
+      hfUrl: uploadResult.hfUrl ?? null,
+      cloudPage: uploadResult.cloudPage ?? CLOUD_PAGE_URL,
+      cloudUploaded: true,
+      filename,
+      mime,
+    };
+  }
+
+  // Step 4: Cloud failed — keep local record as "local_only"
+  await saveToLocalGallery({
+    ...record,
+    cloudStatus: "local_only",
+  });
+  return {
+    success: true, // Still success — capture saved locally
+    localId,
+    cloudUrl: null,
+    cloudKey: null,
+    hfUrl: null,
+    cloudPage: CLOUD_PAGE_URL,
+    cloudUploaded: false,
+    cloudError: uploadResult.error,
+    filename,
+    mime,
+  };
+}
+
+/**
+ * List images/videos for this device, with local fallback.
+ *
+ * Tries cloud first (preserves old behavior when cloud is reachable).
+ * If cloud returns an error (403, network, etc.), falls back to local
+ * IndexedDB records so the gallery still shows the user's captures.
+ *
+ * Records from local IDB are mapped to the same CloudFile shape so the
+ * gallery UI doesn't need to know the difference. The `url` field points
+ * to a blob: URL created on-demand from the stored blob (revoked when
+ * the gallery item is closed or replaced).
+ *
+ * Returns both the files AND a `source` field indicating where the data
+ * came from — useful for showing a "Cloud offline — showing local gallery"
+ * banner in the UI.
+ */
+export async function listCloudImagesWithLocalFallback(): Promise<{
+  success: boolean;
+  files: CloudFile[];
+  source: "cloud" | "local";
+  error?: string;
+}> {
+  // Try cloud first
+  const cloudResult = await listCloudImages();
+  if (cloudResult.success && cloudResult.files) {
+    return {
+      success: true,
+      files: cloudResult.files,
+      source: "cloud",
+    };
+  }
+
+  // Cloud failed — fall back to local IDB
+  console.warn(
+    "[cloud] listing failed, falling back to local gallery:",
+    cloudResult.error,
+  );
+  const deviceId = getDeviceId();
+  const localRecords = await listLocalGallery(deviceId);
+
+  // Map local records to CloudFile shape
+  // Note: we don't create blob URLs here — the gallery UI should create
+  // them on-demand when rendering each thumbnail (and revoke when unmounting).
+  // We store the local id in the `key` field so the gallery can fetch
+  // the full blob when needed via getLocalGalleryRecord().
+  const files: CloudFile[] = localRecords.map((rec) => ({
+    id: rec.id,
+    name: rec.filename,
+    key: rec.cloudKey ?? `local:${rec.id}`,
+    size: rec.size,
+    sizeHuman: formatBytes(rec.size),
+    mime: rec.mime,
+    status: rec.cloudStatus === "uploaded" ? "cloud" : "local",
+    isPublic: rec.cloudStatus === "uploaded",
+    url: rec.cloudUrl ?? `local:${rec.id}`,
+    hfUrl: rec.hfUrl,
+    createdAt: rec.createdAt,
+  }));
+
+  return {
+    success: true,
+    files,
+    source: "local",
+    error: cloudResult.error,
+  };
 }
 
 export const CLOUD_URL = CLOUD_PAGE_URL;

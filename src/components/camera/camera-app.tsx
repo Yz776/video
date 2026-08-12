@@ -17,10 +17,12 @@ import {
   openCameraStream,
   CAMERA_CONSTRAINT_LEVELS,
   listCloudImages,
+  listCloudImagesWithLocalFallback,
   pickRecorderMime,
   processToHeic,
   upgradeStreamResolution,
   uploadToCloud,
+  uploadCaptureWithLocalFallback,
 } from "./utils";
 import {
   CaptureButton,
@@ -229,14 +231,24 @@ export function CameraApp() {
     }, 360);
   }, []);
 
-  // ---- Cloud list refresh ----
+  // ---- Cloud list refresh (with local IndexedDB fallback) ----
+  // When cloud.kangwifi.eu.org is unreachable (403, network error), this
+  // automatically falls back to listing files from local IndexedDB so the
+  // user still sees their captured photos in the gallery strip.
   const refreshCloud = useCallback(async () => {
     setCloudLoading(true);
-    const result = await listCloudImages();
+    const result = await listCloudImagesWithLocalFallback();
     setCloudLoading(false);
     if (result.success && result.files) {
       setCloudFiles(result.files);
       setCloudCount(result.files.length);
+      // Log the source so we can debug "why is gallery showing old data"
+      if (result.source === "local") {
+        console.info(
+          "[gallery] cloud unreachable — showing local IndexedDB gallery",
+          result.error ? `(${result.error})` : "",
+        );
+      }
     }
   }, []);
 
@@ -274,7 +286,10 @@ export function CameraApp() {
     refreshCloud();
   }, [refreshCloud]);
 
-  // ---- Upload a processed capture to cloud ----
+  // ---- Upload a processed capture to cloud (with local IndexedDB fallback) ----
+  // Even if cloud.kangwifi.eu.org is unreachable (403, network error), the
+  // capture is saved to local IndexedDB so the user never loses their photo.
+  // The gallery strip will show local files when cloud is down.
   const uploadCapture = useCallback(
     async (
       heicBlob: Blob,
@@ -287,17 +302,30 @@ export function CameraApp() {
     ): Promise<JustCapturedInfo | null> => {
       setProcessing("Mengunggah ke cloud…");
       try {
-        const uploadResult = await uploadToCloud(heicBlob, filename, mime);
-        if (!uploadResult.success || !uploadResult.url) {
-          throw new Error(uploadResult.error ?? "Upload cloud gagal");
+        // uploadCaptureWithLocalFallback always saves to IDB + tries cloud.
+        // Returns success=true even if cloud failed (photo still saved locally).
+        const result = await uploadCaptureWithLocalFallback(
+          heicBlob,
+          previewBlob,
+          filename,
+          mime,
+          kind,
+          width,
+          height,
+        );
+        if (!result.success) {
+          throw new Error(result.cloudError ?? "Penyimpanan gagal");
         }
+
+        // Create blob URLs for preview & download (work regardless of cloud)
         const previewUrl = previewBlob
           ? URL.createObjectURL(previewBlob)
           : URL.createObjectURL(heicBlob);
         const downloadUrl = URL.createObjectURL(heicBlob);
         justCapturedUrlsRef.current = { preview: previewUrl, download: downloadUrl };
+
         const info: JustCapturedInfo = {
-          id: genId(),
+          id: result.localId, // Use local IDB id — gallery can fetch full blob later
           previewUrl,
           downloadUrl,
           filename,
@@ -305,11 +333,21 @@ export function CameraApp() {
           width,
           height,
           size: heicBlob.size,
-          cloudUrl: uploadResult.url,
-          cloudKey: uploadResult.key,
-          hfUrl: uploadResult.hfUrl,
+          // If cloud uploaded, use cloud URL; otherwise leave undefined
+          // (download button falls back to local blob URL)
+          cloudUrl: result.cloudUrl ?? undefined,
+          cloudKey: result.cloudKey ?? undefined,
+          hfUrl: result.hfUrl ?? undefined,
           kind,
         };
+
+        // If cloud failed but local succeeded, notify user
+        if (!result.cloudUploaded) {
+          toast.warning(
+            "Cloud sedang offline — foto disimpan lokal di perangkat ini",
+          );
+        }
+
         return info;
       } finally {
         setProcessing(null);
