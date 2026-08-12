@@ -313,3 +313,36 @@ Stage Summary:
 - ✅ ImageCapture still uses sensor-native 4K (unchanged, was already good)
 - ✅ Video element CSS enhances perceived sharpness on AMOLED
 - ✅ Debug logging helps user verify actual resolution on their device
+
+---
+Task ID: overconstrained-fix
+Agent: main (Super Z)
+Task: User report "OverconstrainedError" — camera fails to start
+
+Work Log:
+- Root cause: previous commit (HD camera upgrade) added `min: 1920×1080` + `aspectRatio: 4/3` + `frameRate: {min: 24}` + `advanced` array. Many devices can't satisfy one or more:
+  * Front cameras on mid-range phones often cap at 720p → reject `min: 1080`
+  * Old phones / webcams reject `aspectRatio`
+  * Some Chrome builds reject `advanced` arrays
+  * Some devices reject `frameRate.min`
+
+- Refactored utils.ts:
+  * Added CAMERA_CONSTRAINT_LEVELS constant: STRICT(0), LOOSE(1), MINIMAL(2), BASIC(3)
+  * Added buildStreamConstraints(facing, level, zoom) — returns constraints for a level
+  * Added openCameraStream(facing, zoom) — iterates levels, falls back on OverconstrainedError
+  * Kept getIdealStreamConstraints() as @deprecated alias (returns LOOSE level)
+
+- Updated camera-app.tsx startCamera():
+  * Replaced getUserMedia(getIdealStreamConstraints(...)) with openCameraStream(facing, zoom)
+  * Destructured {stream, level} — skip upgradeStreamResolution if BASIC (device clearly limited)
+  * Updated console.log to show which level succeeded:
+    `[camera] active stream: 4096×3072 @ 30fps, facing=environment, constraint=STRICT`
+
+- Build succeeded, bundle contains all 4 constraint levels (verified via grep on chunk file)
+- Committed bdd0d32, pushed to GitHub (1119117..bdd0d32)
+
+Stage Summary:
+- ✅ OverconstrainedError auto-recovered via fallback ladder
+- ✅ Still tries highest quality (STRICT 4K) first on flagship devices
+- ✅ Always falls back to BASIC (just facingMode) — never leaves user with broken camera
+- ✅ Console log shows which level succeeded for debugging
