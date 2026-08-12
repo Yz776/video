@@ -3,29 +3,105 @@ import type { CameraSettings, CloudFile } from "@/components/camera/types";
 /**
  * Pick the best constraints for getUserMedia — prefer the highest resolution
  * the device's main camera can provide.
+ *
+ * Strategy: ask for 4K (4096×3072) as `ideal`. If the device can't do 4K,
+ * the browser will fall back to the closest supported resolution. We also
+ * add `min: 1920×1080` so we never get stuck at 1280×720 (the browser
+ * default when no constraints are given) — that would make the viewfinder
+ * look soft on modern phone screens.
+ *
+ * The `advanced` array lists additional resolution candidates the browser
+ * should try in order if the primary ideal fails. Many Android phones cap
+ * stream at 1920×1080 for live preview, so we explicitly list that as a
+ * fallback so the viewfinder stays crisp HD rather than dropping to SD.
+ *
+ * aspectRatio 4:3 matches most rear phone cameras natively (4032×3024 etc);
+ * forcing 16:9 would crop the sensor and lose megapixels.
  */
 export function getIdealStreamConstraints(
   facing: "environment" | "user",
   zoom: number = 1,
 ) {
-  // Some browsers honor zoom via MediaTrackConstraints
   const zoomConstraint =
     zoom > 1 ? { zoom: { ideal: zoom } } : {};
   return {
-    audio: true,
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
     video: {
       facingMode: { ideal: facing },
-      width: { ideal: 4096 },
-      height: { ideal: 3072 },
+      width: { min: 1920, ideal: 4096 },
+      height: { min: 1080, ideal: 3072 },
+      aspectRatio: { ideal: facing === "environment" ? 4 / 3 : 3 / 4 },
+      frameRate: { min: 24, ideal: 30, max: 60 },
       resizeMode: "none" as const,
       ...zoomConstraint,
+      advanced: [
+        // Try 4K first (most rear cameras support this for stills),
+        // then 1080p HD as a safe fallback that all phones support.
+        { width: 4096, height: 3072 },
+        { width: 3840, height: 2160 },
+        { width: 3264, height: 2448 },
+        { width: 2560, height: 1920 },
+        { width: 1920, height: 1080 },
+      ] as MediaTrackConstraintSet[],
     },
   };
 }
 
 /**
+ * After getUserMedia succeeds, check whether the active track actually
+ * delivered a high resolution. If the browser capped it at SD (640×480
+ * or 1280×720), try to upgrade by applying 4K constraints. This handles
+ * the common Android behavior where the first request silently returns
+ * a low-res stream.
+ */
+export async function upgradeStreamResolution(
+  stream: MediaStream,
+  targetWidth: number = 4096,
+  targetHeight: number = 3072,
+): Promise<void> {
+  const track = stream.getVideoTracks()[0];
+  if (!track) return;
+  const settings = track.getSettings();
+  // If we already got at least 1080p, leave it alone
+  if ((settings.width ?? 0) >= 1920 && (settings.height ?? 0) >= 1080) return;
+  try {
+    await track.applyConstraints({
+      width: { ideal: targetWidth },
+      height: { ideal: targetHeight },
+      advanced: [
+        { width: 4096, height: 3072 },
+        { width: 3264, height: 2448 },
+        { width: 1920, height: 1080 },
+      ],
+    } as MediaTrackConstraints);
+  } catch {
+    // If applyConstraints rejects, the device genuinely can't do higher —
+    // just keep what we have. The viewfinder will still work.
+  }
+}
+
+/**
  * Try to grab a full-resolution still frame from the live video track using
  * ImageCapture. Falls back to canvas capture when ImageCapture is unavailable.
+ *
+ * ImageCapture.takePhoto() goes directly to the camera sensor and produces
+ * a JPEG at the sensor's native resolution (often 4032×3024 on Android,
+ * 12MP+). This is fundamentally higher quality than drawing the video
+ * element to a canvas, which only captures the live preview stream
+ * (usually capped at 1920×1080).
+ *
+ * PhotoSettings we pass:
+ *   imageWidth/imageHeight: 4096×3072 ideal — same as getUserMedia,
+ *     the camera driver will pick the closest native resolution.
+ *   focusMode: "auto" — continuous AF for sharp results
+ *   exposureMode: "auto" — auto exposure for balanced brightness
+ *   whiteBalanceMode: "auto" — auto WB for accurate colors
+ *   fillLightMode: "off" — flash handled separately via torch toggle
+ *     (passing "auto"/"flash" here would double-fire the flash)
  */
 export async function captureFullResolutionPhoto(
   video: HTMLVideoElement,
@@ -43,6 +119,7 @@ export async function captureFullResolutionPhoto(
             whiteBalanceMode: "auto",
             exposureMode: "auto",
             focusMode: "auto",
+            // ISO and focus distance left unset — auto is best for general shooting
           });
           try {
             const bmp = await createImageBitmap(blob);
@@ -56,6 +133,9 @@ export async function captureFullResolutionPhoto(
       }
     }
   }
+  // Fallback: canvas capture at video stream resolution.
+  // This is lower quality than ImageCapture (preview stream, not sensor)
+  // but works on browsers without ImageCapture support (Firefox, Safari < 17).
   const w = video.videoWidth || 1920;
   const h = video.videoHeight || 1080;
   const canvas = document.createElement("canvas");
@@ -63,6 +143,10 @@ export async function captureFullResolutionPhoto(
   canvas.height = h;
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("Canvas 2D context unavailable");
+  // imageSmoothingQuality="high" ensures the canvas snapshot uses the
+  // best possible filtering when the video source is non-integer scaled.
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
   ctx.drawImage(video, 0, 0, w, h);
   const blob: Blob = await new Promise((resolve, reject) =>
     canvas.toBlob(

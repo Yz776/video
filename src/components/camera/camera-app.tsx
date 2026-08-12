@@ -18,6 +18,7 @@ import {
   listCloudImages,
   pickRecorderMime,
   processToHeic,
+  upgradeStreamResolution,
   uploadToCloud,
 } from "./utils";
 import {
@@ -91,11 +92,22 @@ export function CameraApp() {
         const constraints = getIdealStreamConstraints(facingMode, zoom);
         const stream = await navigator.mediaDevices.getUserMedia(constraints);
         streamRef.current = stream;
+        // Try to upgrade resolution if browser gave us a low-res stream.
+        // Many Android browsers silently cap at 1280×720 even when 4K was requested.
+        await upgradeStreamResolution(stream);
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play().catch(() => {});
         }
         setStreaming(true);
+        // Log actual track settings to console (helps debug resolution issues)
+        const track = stream.getVideoTracks()[0];
+        if (track) {
+          const s = track.getSettings();
+          console.log(
+            `[camera] active stream: ${s.width}×${s.height} @ ${s.frameRate}fps, facing=${s.facingMode}`,
+          );
+        }
         applyTorch(stream, flash === "on" || flash === "torch");
       } catch (e) {
         console.error(e);
@@ -1006,6 +1018,14 @@ function cnVideo(facing: FacingMode, zoom: number): { className: string; style: 
     style: {
       transform: `scaleX(${scaleX}) scale(${scale})`,
       transformOrigin: "center center",
+      // Crisp rendering hints — most browsers honor image-rendering:auto
+      // but `high-quality` forces the GPU to use bicubic instead of bilinear.
+      // The slight contrast/saturation bump makes the preview feel more
+      // "HD" on AMOLED screens without changing the actual capture (filter
+      // is applied to <video> only, NOT to the ImageCapture still which
+      // goes straight to the backend untouched).
+      imageRendering: "high-quality" as React.CSSProperties["imageRendering"],
+      filter: "contrast(1.04) saturate(1.06)",
     },
   };
 }
