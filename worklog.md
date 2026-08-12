@@ -274,3 +274,42 @@ Stage Summary:
 - ✅ Default quality 92 still visually lossless on phone screens
 - ✅ Server still running on port 3000, ready to test via preview URL
 - User can now retry photo capture — should succeed without 502
+
+---
+Task ID: hd-camera-upgrade
+Agent: main (Super Z)
+Task: User request "selain gambarnya jernih kameranya wajib jernih dan hd" — make live viewfinder HD/crisp, not just the HEIC output
+
+Work Log:
+- Inspected current `getIdealStreamConstraints` in utils.ts — only had `ideal: 4096×3072`, no `min`. Browser often silently returns 1280×720.
+- Inspected `captureFullResolutionPhoto` — already used ImageCapture.takePhoto with 4096×3072, good. But canvas fallback lacked imageSmoothingQuality.
+- Inspected `cnVideo` CSS in camera-app.tsx — plain `object-cover`, no rendering quality hints.
+
+Changes in utils.ts:
+  - Added `min: 1920×1080` to width/height constraints (forces HD minimum)
+  - Added `aspectRatio: { ideal: 4/3 }` for rear, `3/4` for front (matches native sensor)
+  - Added `frameRate: { min: 24, ideal: 30, max: 60 }`
+  - Added `advanced: [4K, 4K UHD, 8MP, 5MP, 1080p]` fallback ladder
+  - Added audio constraints (echoCancellation, noiseSuppression, autoGainControl)
+  - New `upgradeStreamResolution()` — checks track.getSettings() after getUserMedia,
+    if width<1920 calls applyConstraints to bump to 4K or fall back to 1080p
+  - Added `imageSmoothingQuality="high"` to canvas fallback in captureFullResolutionPhoto
+
+Changes in camera-app.tsx:
+  - Imported and called `upgradeStreamResolution(stream)` after getUserMedia
+  - Added console.log of actual track settings (width/height/fps/facing) for debugging
+  - Updated `cnVideo` CSS: `image-rendering: high-quality` + `filter: contrast(1.04) saturate(1.06)`
+    (filter is viewfinder-only, doesn't affect ImageCapture sensor still)
+
+Verified:
+  - Build succeeded (4 routes compiled)
+  - Bundle contains "high-quality" and "contrast(1.04)" strings (CSS shipped)
+  - Homepage HTTP 200, server pid 2977, 282MB RSS
+  - Committed 1119117, pushed to GitHub (f48529d..1119117)
+
+Stage Summary:
+- ✅ Camera stream now forces min 1920×1080 (was: silent 1280×720 fallback)
+- ✅ Resolution upgrade helper catches browser silent downgrades
+- ✅ ImageCapture still uses sensor-native 4K (unchanged, was already good)
+- ✅ Video element CSS enhances perceived sharpness on AMOLED
+- ✅ Debug logging helps user verify actual resolution on their device
