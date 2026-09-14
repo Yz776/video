@@ -1,11 +1,17 @@
 import type { CameraSettings, CloudFile } from "@/components/camera/types";
 import {
-  saveToLocalGallery,
-  listLocalGallery,
-  getLocalGalleryRecord,
-  deleteFromLocalGallery,
-  type LocalGalleryRecord,
-  type CaptureKind,
+ WebGLImageProcessor,
+ detectWebGL,
+ type CapturePipelineOptions,
+ type DeviceInfo,
+} from "./webgl/processor";
+import {
+ saveToLocalGallery,
+ listLocalGallery,
+ getLocalGalleryRecord,
+ deleteFromLocalGallery,
+ type LocalGalleryRecord,
+ type CaptureKind,
 } from "./local-gallery";
 
 /**
@@ -61,19 +67,19 @@ export function buildStreamConstraints(
           height: { min: 1080, ideal: 3072 },
           aspectRatio: { ideal: facing === "environment" ? 4 / 3 : 3 / 4 },
           frameRate: { min: 24, ideal: 30, max: 60 },
-          resizeMode: "none" as const,
-          ...zoomConstraint,
-          advanced: [
-            { width: 4096, height: 3072 },
-            { width: 3840, height: 2160 },
-            { width: 3264, height: 2448 },
-            { width: 2560, height: 1920 },
-            { width: 1920, height: 1080 },
-          ] as MediaTrackConstraintSet[],
-        },
-      };
+   resizeMode: "none" as const,
+    ...zoomConstraint,
+    advanced: [
+     { width: 4096, height: 3072 },
+     { width: 3840, height: 2160 },
+     { width: 3264, height: 2448 },
+     { width: 2560, height: 1920 },
+     { width: 1920, height: 1080 },
+    ] as MediaTrackConstraintSet[],
+   } as unknown as MediaTrackConstraints,
+  };
 
-    case CAMERA_CONSTRAINT_LEVELS.LOOSE:
+ case CAMERA_CONSTRAINT_LEVELS.LOOSE:
       // Drop min/aspect/frameRate.min — common rejection points on mid-range
       // devices. Keep `ideal` and `advanced` ladder.
       return {
@@ -91,11 +97,11 @@ export function buildStreamConstraints(
             { width: 3264, height: 2448 },
             { width: 2560, height: 1920 },
             { width: 1920, height: 1080 },
-          ] as MediaTrackConstraintSet[],
-        },
-      };
+    ] as MediaTrackConstraintSet[],
+   } as unknown as MediaTrackConstraints,
+  };
 
-    case CAMERA_CONSTRAINT_LEVELS.MINIMAL:
+ case CAMERA_CONSTRAINT_LEVELS.MINIMAL:
       // Only ideal width/height + facing. No advanced, no aspect, no fps max.
       // This matches what most basic PWA camera apps use.
       return {
@@ -150,9 +156,9 @@ export async function openCameraStream(
       return { stream, level };
     } catch (e) {
       lastErr = e;
-      const err = e as DOMException;
-      // OverconstrainedError → try next softer level
-      if (err.name === "OverconstrainedError") {
+ const err = e as DOMException & { constraint?: string };
+ // OverconstrainedError → try next softer level
+ if (err.name === "OverconstrainedError") {
         console.warn(
           `[camera] constraints level ${level} rejected (${err.message || err.constraint}),
           falling back to level ${level + 1}`,
@@ -245,14 +251,20 @@ export async function captureFullResolutionPhoto(
       try {
         const ic = new ImageCapture(track);
         if (typeof ic.takePhoto === "function") {
-          const blob: Blob = await ic.takePhoto({
-            imageWidth: { ideal: 4096 },
-            imageHeight: { ideal: 3072 },
-            whiteBalanceMode: "auto",
-            exposureMode: "auto",
-            focusMode: "auto",
-            // ISO and focus distance left unset — auto is best for general shooting
-          });
+      const blob: Blob = await ic.takePhoto({
+       // NOTE: PhotoSettings.imageWidth/imageHeight are plain numbers in
+       // the Image Capture spec (ULong), NOT constraint dictionaries —
+       // passing {ideal: …} made takePhoto() reject silently and the app
+       // fell back to a 1080p canvas snapshot, never the sensor shot.
+       // The *Mode members exist in the runtime IDL but not yet in the
+       // TS lib.dom PhotoSettings, hence the cast below.
+       imageWidth: 4096,
+       imageHeight: 3072,
+       whiteBalanceMode: "auto",
+       exposureMode: "auto",
+       focusMode: "auto",
+       // ISO and focus distance left unset — auto is best for general shooting
+      } as unknown as PhotoSettings);
           try {
             const bmp = await createImageBitmap(blob);
             return { blob, width: bmp.width, height: bmp.height };
@@ -292,6 +304,8 @@ export async function captureFullResolutionPhoto(
 
 /**
  * Send a still image to the backend for upscale + HEIC + filter.
+ * @deprecated Prefer processCapture() — this keeps the old server-only
+ * pipeline available as a fallback and for compatibility.
  */
 export async function processToHeic(
   blob: Blob,
@@ -315,8 +329,9 @@ export async function processToHeic(
   fd.append("filter", settings.filter);
   fd.append("aspect", settings.aspect);
   fd.append("vignette", settings.vignette ? "1" : "0");
-  fd.append("hdr", settings.hdr ? "1" : "0");
-  fd.append("preview", "1");
+ fd.append("hdr", settings.hdr ? "1" : "0");
+ fd.append("night", settings.nightMode ? "1" : "0");
+ fd.append("preview", "1");
   fd.append("exposure", String(settings.exposure));
   fd.append("contrast", String(settings.contrast));
   fd.append("saturation", String(settings.saturation));
@@ -363,11 +378,260 @@ export async function processToHeic(
   };
 }
 
-function base64ToBytes(b64: string): Uint8Array {
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return bytes;
+function base64ToBytes(b64: string): Uint8Array<ArrayBuffer> {
+ const bin = atob(b64);
+ const bytes = new Uint8Array(new ArrayBuffer(bin.length));
+ for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+ return bytes;
+}
+
+// ============================================================
+// WEBGL CLIENT PIPELINE — the default rendering engine
+// ============================================================
+//
+// All heavy image math (denoise, Lanczos upscale, HDR local contrast,
+// grade/filters, night mode, sharpen) runs on the DEVICE GPU via
+// src/components/camera/webgl. The server is only used to convert the
+// processed JPEG to HEIC (AV1), which browsers cannot encode natively.
+// If the HEIC hop fails for ANY reason (offline, server error), we save
+// the processed JPEG itself — the capture is never lost.
+
+let processorSingleton: WebGLImageProcessor | null = null;
+let processorBroken = false;
+
+function getProcessor(): WebGLImageProcessor | null {
+ if (processorBroken) return null;
+ if (typeof window === "undefined") return null;
+ if (!detectWebGL().supported) return null;
+ if (!processorSingleton) {
+  try {
+   processorSingleton = new WebGLImageProcessor();
+  } catch (e) {
+   console.warn("[webgl] processor init failed — falling back to server:", e);
+   processorBroken = true;
+   return null;
+  }
+ }
+ return processorSingleton;
+}
+
+/** Capability info for the settings UI ("engine: WebGL Adreno …"). */
+export function getEngineInfo(): DeviceInfo & { active: boolean } {
+ const info = detectWebGL();
+ const proc = getProcessor();
+ return { ...info, active: !!proc && !processorBroken };
+}
+
+/** Build the GPU pipeline options from user camera settings. */
+export function buildPipelineOptions(
+ settings: CameraSettings,
+): CapturePipelineOptions {
+ return {
+  upscale: settings.upscale,
+  aspect: settings.aspect,
+  denoise: settings.denoise,
+  sharpen: settings.sharpen,
+  enhance: settings.enhance,
+  hdr: settings.hdr,
+  nightMode: settings.nightMode,
+  vignette: settings.vignette,
+  filter: settings.filter,
+  exposure: settings.exposure,
+  contrast: settings.contrast,
+  saturation: settings.saturation,
+  temperature: settings.temperature,
+ };
+}
+
+interface DecodedImage {
+ width: number;
+ height: number;
+ source: ImageBitmap | HTMLCanvasElement;
+ close(): void;
+}
+
+/** Decode a captured blob to a GPU-uploadable image, EXIF-orientation safe. */
+async function decodeCapture(blob: Blob): Promise<DecodedImage> {
+ if (typeof createImageBitmap === "function") {
+  try {
+   const bmp = await createImageBitmap(blob, {
+    imageOrientation: "from-image",
+   } as ImageBitmapOptions);
+   return {
+    width: bmp.width,
+    height: bmp.height,
+    source: bmp,
+    close: () => bmp.close(),
+   };
+  } catch {
+   /* fall through to <img> decoding */
+  }
+ }
+ const url = URL.createObjectURL(blob);
+ try {
+  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+   const i = new Image();
+   i.onload = () => resolve(i);
+   i.onerror = () => reject(new Error("decode failed"));
+   i.src = url;
+  });
+  const c = document.createElement("canvas");
+  c.width = img.naturalWidth;
+  c.height = img.naturalHeight;
+  const ctx2d = c.getContext("2d");
+  if (!ctx2d) throw new Error("no 2d ctx");
+  ctx2d.drawImage(img, 0, 0);
+  return {
+   width: c.width,
+   height: c.height,
+   source: c,
+   close: () => {
+    c.width = 1;
+    c.height = 1;
+   },
+  };
+ } finally {
+  URL.revokeObjectURL(url);
+ }
+}
+
+/**
+ * Ask the server to ONLY encode HEIC (AV1) from an already-processed
+ * JPEG. Throws on any failure — callers decide the fallback.
+ */
+async function encodeHeicServer(
+ jpegBlob: Blob,
+ quality: number,
+): Promise<Blob> {
+ const fd = new FormData();
+ fd.append("file", jpegBlob, "processed.jpg");
+ fd.append("processed", "1");
+ fd.append("quality", String(quality));
+ const res = await fetch("/api/process", { method: "POST", body: fd });
+ if (!res.ok) {
+  const txt = await res.text().catch(() => "Unknown error");
+  throw new Error(`HEIC encode failed (${res.status}): ${txt}`);
+ }
+ const data = (await res.json()) as { heic: string };
+ return new Blob([base64ToBytes(data.heic)], { type: "image/heic" });
+}
+
+export interface CaptureResult {
+ blob: Blob; // main file (HEIC, or JPEG if HEIC encoding is unavailable)
+ previewBlob: Blob; // small JPEG for the gallery
+ width: number;
+ height: number;
+ originalWidth: number;
+ originalHeight: number;
+ /** which engine actually produced the pixels */
+ engine: "webgl" | "server";
+ /** "image/heic" or "image/jpeg" (webgl path when server HEIC is down) */
+ mime: string;
+ ext: "heic" | "jpg";
+}
+
+/**
+ * THE capture processing entrypoint. Tries the WebGL GPU pipeline first
+ * (device-maximal, instant, offline-capable) and transparently falls
+ * back to the legacy server pipeline when WebGL is unavailable or the
+ * sensor capture exceeds the GPU texture limits.
+ */
+export async function processCapture(
+ rawBlob: Blob,
+ settings: CameraSettings,
+): Promise<CaptureResult> {
+ const proc = getProcessor();
+ if (proc) {
+  let decoded: DecodedImage | null = null;
+  try {
+   decoded = await decodeCapture(rawBlob);
+   if (proc.canProcess(decoded.width, decoded.height)) {
+    const out = await proc.process(
+     decoded.source,
+     buildPipelineOptions(settings),
+    );
+    // GPU pixels are done — now optionally wrap in HEIC.
+    try {
+     const heic = await encodeHeicServer(out.blob, settings.quality);
+     return {
+      blob: heic,
+      previewBlob: out.previewBlob,
+      width: out.width,
+      height: out.height,
+      originalWidth: out.originalWidth,
+      originalHeight: out.originalHeight,
+      engine: "webgl",
+      mime: "image/heic",
+      ext: "heic",
+    };
+    } catch (e) {
+     console.warn("[capture] HEIC encode unavailable, keeping processed JPEG:", e);
+     return {
+      blob: out.blob,
+      previewBlob: out.previewBlob,
+      width: out.width,
+      height: out.height,
+      originalWidth: out.originalWidth,
+      originalHeight: out.originalHeight,
+      engine: "webgl",
+      mime: "image/jpeg",
+      ext: "jpg",
+     };
+    }
+   }
+   // source bigger than this GPU can upload → server pipeline below
+   console.warn(
+    `[webgl] ${decoded.width}×${decoded.height} exceeds GPU limit — using server pipeline`,
+   );
+  } catch (e) {
+   console.warn("[webgl] GPU pipeline failed, falling back to server:", e);
+   if (e instanceof Error && /context lost/i.test(e.message)) {
+    processorSingleton?.dispose();
+    processorSingleton = null;
+   }
+  } finally {
+   decoded?.close();
+  }
+ }
+ // ---- legacy server pipeline (full sharp processing) ----
+ const server = await processToHeic(rawBlob, settings);
+ return {
+  blob: server.blob,
+  previewBlob: server.previewBlob,
+  width: server.width,
+  height: server.height,
+  originalWidth: server.originalWidth,
+  originalHeight: server.originalHeight,
+  engine: "server",
+  mime: "image/heic",
+  ext: "heic",
+ };
+}
+
+/**
+ * Night mode sensor assist: nudge exposure compensation while the view
+ * is open so the RAW data coming off the sensor is brighter BEFORE the
+ * GPU works its magic. Silently ignored on devices without the capability.
+ */
+export async function applyNightExposure(
+ stream: MediaStream,
+ on: boolean,
+): Promise<void> {
+ try {
+  const track = stream.getVideoTracks()[0];
+  if (!track) return;
+  const caps = (track.getCapabilities?.() ?? {}) as MediaTrackCapabilities & {
+   exposureCompensation?: { min: number; max: number; step: number };
+  };
+  const ec = caps.exposureCompensation;
+  if (!ec || typeof ec.min !== "number") return;
+  const value = on ? Math.min(ec.max, Math.max(ec.min, 0.3)) : 0;
+  await track.applyConstraints({
+   advanced: [{ exposureMode: "auto", exposureCompensation: value } as MediaTrackConstraintSet],
+  } as MediaTrackConstraints);
+ } catch {
+  /* device doesn't support exposure compensation — the GPU lift handles it */
+ }
 }
 
 export function pickRecorderMime(): { mime: string; ext: "webm" | "mp4" } {

@@ -18,21 +18,24 @@ type FilterPreset =
 type AspectRatio = "free" | "1:1" | "4:3" | "16:9" | "3:4";
 
 interface ProcessParams {
-  file: File;
-  upscale: number; // 1, 2, 4
-  quality: number; // 60-100
-  sharpen: boolean;
-  denoise: boolean;
-  enhance: boolean;
-  filter: FilterPreset;
-  aspect: AspectRatio;
-  wantPreview: boolean;
-  exposure: number; // -1 .. 1
-  contrast: number; // -1 .. 1
-  saturation: number; // -1 .. 1
-  temperature: number; // -1 .. 1 (warm-cool)
-  vignette: boolean;
-  hdr: boolean;
+ file: File;
+ upscale: number; // 1, 2, 4
+ quality: number; // 60-100
+ sharpen: boolean;
+ denoise: boolean;
+ enhance: boolean;
+ filter: FilterPreset;
+ aspect: AspectRatio;
+ wantPreview: boolean;
+ exposure: number; // -1 .. 1
+ contrast: number; // -1 .. 1
+ saturation: number; // -1 .. 1
+ temperature: number; // -1 .. 1 (warm-cool)
+ vignette: boolean;
+ hdr: boolean;
+ night: boolean;
+ /** true → input is already GPU-processed; only wrap it in HEIC */
+ processed: boolean;
 }
 
 /**
@@ -163,16 +166,52 @@ export async function POST(req: NextRequest) {
       contrast: clampNum(formData.get("contrast"), 0, [-1, 1], 0),
       saturation: clampNum(formData.get("saturation"), 0, [-1, 1], 0),
       temperature: clampNum(formData.get("temperature"), 0, [-1, 1], 0),
-      vignette: formData.get("vignette") === "1",
-      hdr: formData.get("hdr") === "1",
-    };
+  vignette: formData.get("vignette") === "1",
+  hdr: formData.get("hdr") === "1",
+  night: formData.get("night") === "1",
+  processed: formData.get("processed") === "1",
+ };
 
-    const inputBuf = Buffer.from(await file.arrayBuffer());
+ const inputBuf = Buffer.from(await file.arrayBuffer());
 
-    // ---- Read metadata ----
-    const meta = await sharp(inputBuf).metadata();
-    const origW = meta.width ?? 1920;
-    const origH = meta.height ?? 1080;
+ // ---- Read metadata ----
+ const meta = await sharp(inputBuf).metadata();
+ const origW = meta.width ?? 1920;
+ const origH = meta.height ?? 1080;
+
+ // ============================================================
+ // PASSTHROUGH MODE — client already did the GPU pipeline (WebGL).
+ // The server's ONLY job here is JPEG → HEIC (AV1), which browsers
+ // cannot encode natively. No sharp processing → ~1-2s instead of 7s,
+ // and identical output regardless of server CPU. This is how "kangwifi
+ // cam" keeps the HEIC feature while making processing client-side.
+ // ============================================================
+ if (params.processed) {
+  const heicBuf = await sharp(inputBuf, { failOn: "none" })
+   .heif({
+    compression: "av1",
+    quality: params.quality,
+    effort: 3,
+   })
+   .toBuffer();
+  return NextResponse.json({
+   heic: heicBuf.toString("base64"),
+   preview: null,
+   width: origW,
+   height: origH,
+   originalWidth: origW,
+   originalHeight: origH,
+   mime: "image/heic",
+   filter: params.filter,
+   aspect: params.aspect,
+   upscaled: true,
+   upscaleFactor: 1,
+   hdr: params.hdr,
+   vignette: params.vignette,
+   denoise: params.denoise,
+   passthrough: true,
+  });
+ }
 
     // ---- Aspect crop (pre-upscale, so we crop at native resolution) ----
     const cropBox = computeCropBox(origW, origH, params.aspect);
@@ -213,12 +252,16 @@ export async function POST(req: NextRequest) {
     //      - median(1): 3x3 median, kills single-pixel noise & outliers
     //      - blur(0.4): mild gaussian, smooths 8x8 DCT block edges
     //    Always on when upscaling; respects toggle otherwise.
-    if (params.denoise || params.upscale > 1) {
-      pipeline = pipeline.median(1);
-      if (params.upscale > 1) {
-        pipeline = pipeline.blur(0.4);
-      }
-    }
+ if (params.denoise || params.upscale > 1 || params.night) {
+  pipeline = pipeline.median(1);
+  if (params.upscale > 1) {
+   pipeline = pipeline.blur(0.4);
+  }
+  if (params.night) {
+   // stronger smoothing for dark scenes where sensor noise is highest
+   pipeline = pipeline.median(1);
+  }
+ }
 
     // 3. PRE-SHARPEN (NEW) — very mild recovery pass after denoise.
     //    median(1) + blur(0.4) slightly softens real edges; this gentle
@@ -330,9 +373,15 @@ export async function POST(req: NextRequest) {
       pipeline = pipeline.linear(1.04, -5);
     }
 
-    // 10. Gamma lift — gentle midtone lift for "jernih" (clear) look.
-    //     gamma=1.02 brightens midtones slightly without clipping highlights.
-    pipeline = pipeline.gamma(1.02);
+ // 10. Gamma lift — gentle midtone lift for "jernih" (clear) look.
+ // gamma=1.02 brightens midtones slightly without clipping highlights.
+ pipeline = pipeline.gamma(1.02);
+
+ // Night mode (server fallback): stronger shadow lift + a little pop
+ // after the denoise above, mirroring the GPU shader's night curve.
+ if (params.night) {
+  pipeline = pipeline.gamma(1.12).linear(1.06, -4);
+ }
 
     // 11. FINAL SHARPEN — gentle unsharp mask to recover detail lost to
     //     denoise + upscale. Settings tuned to recover crispness WITHOUT

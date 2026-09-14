@@ -11,32 +11,34 @@ import {
   TimerDuration,
 } from "./types";
 import {
-  Zap,
-  ZapOff,
-  RefreshCw,
-  Settings as SettingsIcon,
-  Sparkles,
-  Camera,
-  Video,
-  CircleDot,
-  X,
-  Grid3x3,
-  Gauge,
-  Layers,
-  Palette,
-  Crop,
-  Droplet,
-  Sun,
-  Contrast,
-  Droplets,
-  Thermometer,
-  Timer,
-  Image as ImageIcon,
-  Flame,
-  Aperture,
-  Cloud as CloudIcon,
-  CloudUpload,
-  HardDrive,
+ Zap,
+ ZapOff,
+ RefreshCw,
+ Settings as SettingsIcon,
+ Sparkles,
+ Camera,
+ Video,
+ CircleDot,
+ X,
+ Grid3x3,
+ Gauge,
+ Layers,
+ Palette,
+ Crop,
+ Droplet,
+ Sun,
+ Moon,
+ Contrast,
+ Droplets,
+ Thermometer,
+ Timer,
+ Image as ImageIcon,
+ Flame,
+ Aperture,
+ Cloud as CloudIcon,
+ CloudUpload,
+ HardDrive,
+ Cpu,
 } from "lucide-react";
 import {
   Sheet,
@@ -366,12 +368,26 @@ export function SettingsSheet({
           ))}
         </div>
 
-        <div className="px-1 pb-6 space-y-5">
-          {tab === "quality" && (
-            <>
-              {/* Cloud upload toggle — placed at top so users find it easily.
-                  Default is OFF (offline-first). When OFF, captures stay
-                  only in this device's local IndexedDB gallery. */}
+ <div className="px-1 pb-6 space-y-5">
+ {tab === "quality" && (
+  <>
+   {/* GPU engine status — the WebGL processor is primary; the server
+       pipeline is only a fallback (and the HEIC encode hop). */}
+   <div className="flex items-center gap-3 rounded-xl px-4 py-3 bg-zinc-900 border border-zinc-800">
+    <Cpu className="size-4 text-emerald-300 shrink-0" />
+    <div>
+     <Label className="text-sm font-medium">Engine: GPU Perangkat (WebGL)</Label>
+     <p className="text-[11px] text-white/50 leading-relaxed">
+      Denoise bilateral, upscale Lanczos3, HDR lokal, penajaman, dan Mode
+      Malam semuanya dihitung langsung di GPU ponsel — instan, tanpa
+      menunggu server. Server hanya mengemas hasil ke HEIC.
+     </p>
+    </div>
+   </div>
+
+   {/* Cloud upload toggle — placed at top so users find it easily.
+       Default is OFF (offline-first). When OFF, captures stay
+       only in this device's local IndexedDB gallery. */}
               <div
                 className={cn(
                   "flex items-center justify-between rounded-xl px-4 py-3 border",
@@ -427,10 +443,11 @@ export function SettingsSheet({
                     </button>
                   ))}
                 </div>
-                <p className="text-[11px] text-white/50 leading-relaxed">
-                  Upscale 2× = 2× resolusi (Full HD → 4K). 4× = Ultra HD
-                  (maksimal, lebih lama). Pakai lanczos3 + adaptive sharpening.
-                </p>
+    <p className="text-[11px] text-white/50 leading-relaxed">
+     Upscale 2× = 2× resolusi (Full HD → 4K). 4× = Ultra HD (maksimal).
+     Lanczos3 multi-pass di GPU + denoise bilateral sebelum upscale, jadi
+     tidak pecah. Pada HP lawas otomatis disesuaikan batas tekstur GPU.
+    </p>
               </div>
 
               {/* Quality */}
@@ -452,20 +469,29 @@ export function SettingsSheet({
                 />
               </div>
 
-              {/* HDR */}
-              <ToggleRow
-                icon={<Sun className="size-4 text-amber-300" />}
-                title="HDR Local Contrast"
-                desc="CLAHE + gamma boost untuk shadow/highlight seimbang"
-                checked={settings.hdr}
-                onCheck={(c) => update({ hdr: c })}
-              />
+    {/* Night mode — GPU low-light pipeline */}
+    <ToggleRow
+     icon={<Moon className="size-4 text-indigo-300" />}
+     title="Mode Malam"
+     desc="Denoise agresif + angkat shadow + kontras lokal — foto gelap jadi terang bersih"
+     checked={settings.nightMode}
+     onCheck={(c) => update({ nightMode: c })}
+    />
+
+    {/* HDR */}
+    <ToggleRow
+     icon={<Sun className="size-4 text-amber-300" />}
+     title="HDR Local Contrast"
+     desc="Kontras lokal halo-free untuk shadow/highlight seimbang"
+     checked={settings.hdr}
+     onCheck={(c) => update({ hdr: c })}
+    />
 
               {/* Denoise */}
               <ToggleRow
                 icon={<Droplet className="size-4 text-sky-300" />}
-                title="Denoise"
-                desc="Reduce noise sebelum upscale (median filter)"
+     title="Denoise"
+     desc="Bilateral edge-preserving — hapus noise & blok JPEG tanpa melunakkan tepi"
                 checked={settings.denoise}
                 onCheck={(c) => update({ denoise: c })}
               />
@@ -473,8 +499,8 @@ export function SettingsSheet({
               {/* Sharpen */}
               <ToggleRow
                 icon={<Contrast className="size-4 text-emerald-300" />}
-                title="Adaptive Sharpen"
-                desc="Unsharp mask untuk detail super tajam"
+     title="Adaptive Sharpen"
+     desc="Micro-unsharp bertreshold — tajam natural, anti halo"
                 checked={settings.sharpen}
                 onCheck={(c) => update({ sharpen: c })}
               />
@@ -573,12 +599,18 @@ export function SettingsSheet({
             active={settings.cloudUpload}
             onClick={() => update({ cloudUpload: !settings.cloudUpload })}
           />
-          <QuickPill
-            icon={<Grid3x3 className="size-3.5" />}
-            label="Grid"
-            active={settings.grid}
-            onClick={() => update({ grid: !settings.grid })}
-          />
+     <QuickPill
+      icon={<Grid3x3 className="size-3.5" />}
+      label="Grid"
+      active={settings.grid}
+      onClick={() => update({ grid: !settings.grid })}
+     />
+     <QuickPill
+      icon={<Moon className="size-3.5" />}
+      label="Malam"
+      active={settings.nightMode}
+      onClick={() => update({ nightMode: !settings.nightMode })}
+     />
           <QuickPill
             icon={<Gauge className="size-3.5" />}
             label="Level"

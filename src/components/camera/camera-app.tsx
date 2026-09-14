@@ -11,18 +11,22 @@ import {
   DEFAULT_SETTINGS,
 } from "./types";
 import {
-  captureFullResolutionPhoto,
-  deleteCloudFile,
-  genId,
-  openCameraStream,
-  CAMERA_CONSTRAINT_LEVELS,
-  listCloudImagesWithLocalFallback,
-  pickRecorderMime,
-  processToHeic,
-  upgradeStreamResolution,
-  uploadCaptureWithLocalFallback,
-  saveCaptureLocally,
+ captureFullResolutionPhoto,
+ deleteCloudFile,
+ genId,
+ openCameraStream,
+ CAMERA_CONSTRAINT_LEVELS,
+ listCloudImagesWithLocalFallback,
+ pickRecorderMime,
+ processCapture,
+ upgradeStreamResolution,
+ uploadCaptureWithLocalFallback,
+ saveCaptureLocally,
+ applyNightExposure,
+ getEngineInfo,
 } from "./utils";
+import { WebGLPreviewRenderer } from "./webgl/preview";
+import { detectWebGL } from "./webgl/processor";
 import {
   CaptureButton,
   ModeSelector,
@@ -111,8 +115,74 @@ export function CameraApp() {
   const [selectedCloudFile, setSelectedCloudFile] = useState<CloudFile | null>(null);
   const [justCaptured, setJustCaptured] = useState<JustCapturedInfo | null>(null);
 
-  // Track blob URLs that need cleanup when justCaptured closes
-  const justCapturedUrlsRef = useRef<{ preview?: string; download?: string }>({});
+ // Track blob URLs that need cleanup when justCaptured closes
+ const justCapturedUrlsRef = useRef<{ preview?: string; download?: string }>({});
+
+ // ---- WebGL live preview (WYSIWYG — same grade shader as capture) ----
+ const glPreviewRef = useRef<HTMLCanvasElement>(null);
+ const previewRendererRef = useRef<WebGLPreviewRenderer | null>(null);
+ const [glPreviewActive, setGlPreviewActive] = useState(false);
+ const settingsRef = useRef(settings);
+ settingsRef.current = settings;
+
+ // Create the preview renderer once (canvas is always mounted).
+ useEffect(() => {
+  if (typeof window === "undefined") return;
+  const canvas = glPreviewRef.current;
+  if (!canvas || previewRendererRef.current) return;
+  try {
+   const r = new WebGLPreviewRenderer(canvas, () => {
+    // GPU context lost mid-session → degrade to the plain <video>
+    setGlPreviewActive(false);
+    previewRendererRef.current = null;
+   });
+   previewRendererRef.current = r;
+  } catch {
+   // WebGL unsupported → the <video> viewfinder stays, no harm done
+  }
+  return () => {
+   previewRendererRef.current?.dispose();
+   previewRendererRef.current = null;
+  };
+ }, []);
+
+ // Drive the preview loop with stream + facing state.
+ useEffect(() => {
+  const r = previewRendererRef.current;
+  if (!r) {
+   setGlPreviewActive(false);
+   return;
+  }
+  if (streaming) {
+   if (videoRef.current) r.attach(videoRef.current);
+   r.setSettings({
+    filter: settings.filter,
+    nightMode: settings.nightMode,
+    hdr: settings.hdr,
+    enhance: settings.enhance,
+    exposure: settings.exposure,
+    contrast: settings.contrast,
+    saturation: settings.saturation,
+    temperature: settings.temperature,
+    vignette: settings.vignette,
+    facing,
+   });
+   r.start();
+   setGlPreviewActive(true);
+  } else {
+   r.stop();
+  }
+  return () => {
+   r.stop();
+  };
+ }, [streaming, facing, settings]);
+
+ // Night mode sensor assist: brighten RAW exposure before GPU work.
+ useEffect(() => {
+  if (streamRef.current) {
+   void applyNightExposure(streamRef.current, settings.nightMode);
+  }
+ }, [settings.nightMode, facing]);
 
   // ---- Camera start / stop ----
   const startCamera = useCallback(
@@ -149,6 +219,10 @@ export function CameraApp() {
           );
         }
         applyTorch(stream, flash === "on" || flash === "torch");
+  // Re-apply night exposure assist after (re)opening the stream —
+  // the track was just created, so the settings-change effect's call
+  // was against the OLD track.
+  void applyNightExposure(stream, settingsRef.current.nightMode);
       } catch (e) {
         console.error(e);
         const err = e as Error;
@@ -326,7 +400,7 @@ export function CameraApp() {
   // to local IDB (offline-first mode — default behavior).
   const uploadCapture = useCallback(
     async (
-      heicBlob: Blob,
+      mainBlob: Blob,
       previewBlob: Blob | null,
       filename: string,
       mime: string,
@@ -344,7 +418,7 @@ export function CameraApp() {
         // Branch: cloud upload enabled vs disabled (local-only)
         const result = cloudEnabled
           ? await uploadCaptureWithLocalFallback(
-              heicBlob,
+              mainBlob,
               previewBlob,
               filename,
               mime,
@@ -353,7 +427,7 @@ export function CameraApp() {
               height,
             )
           : await saveCaptureLocally(
-              heicBlob,
+              mainBlob,
               previewBlob,
               filename,
               mime,
@@ -369,8 +443,8 @@ export function CameraApp() {
         // Create blob URLs for preview & download (work regardless of cloud)
         const previewUrl = previewBlob
           ? URL.createObjectURL(previewBlob)
-          : URL.createObjectURL(heicBlob);
-        const downloadUrl = URL.createObjectURL(heicBlob);
+          : URL.createObjectURL(mainBlob);
+        const downloadUrl = URL.createObjectURL(mainBlob);
         justCapturedUrlsRef.current = { preview: previewUrl, download: downloadUrl };
 
         const info: JustCapturedInfo = {
@@ -381,7 +455,7 @@ export function CameraApp() {
           mime,
           width,
           height,
-          size: heicBlob.size,
+          size: mainBlob.size,
           // If cloud uploaded, use cloud URL; otherwise leave undefined
           // (download button falls back to local blob URL)
           cloudUrl: result.cloudUrl ?? undefined,
@@ -453,28 +527,29 @@ export function CameraApp() {
         }
       }
 
-      try {
-        const { blob: rawBlob, width, height } = await captureFullResolutionPhoto(
-          videoRef.current,
-          streamRef.current,
-        );
-        const result = await processToHeic(rawBlob, settings);
-        const finalWidth = result.width || width;
-        const finalHeight = result.height || height;
-        const heicBlob = result.blob;
-        const kind = kindOverride ?? (alsoCaptureVideoClip ? "live" : "photo");
-        const filename = `kangwifi-${Date.now()}.${kind}.heic`;
+ try {
+  const { blob: rawBlob, width, height } = await captureFullResolutionPhoto(
+   videoRef.current,
+   streamRef.current,
+  );
+  setProcessing("Memproses di GPU perangkat (WebGL)…");
+  const result = await processCapture(rawBlob, settings);
+  const finalWidth = result.width || width;
+  const finalHeight = result.height || height;
+  const mainBlob = result.blob;
+  const kind = kindOverride ?? (alsoCaptureVideoClip ? "live" : "photo");
+  const filename = `kangwifi-${Date.now()}.${kind}.${result.ext}`;
 
-        // Upload to cloud
-        const info = await uploadCapture(
-          heicBlob,
-          result.previewBlob,
-          filename,
-          "image/heic",
-          finalWidth,
-          finalHeight,
-          kind,
-        );
+  // Upload to cloud (or save local-only)
+  const info = await uploadCapture(
+   mainBlob,
+   result.previewBlob,
+   filename,
+   result.mime,
+   finalWidth,
+   finalHeight,
+   kind,
+  );
 
         // If live photo: also save the video clip alongside the still.
         // Skipped entirely when cloud upload is disabled (the still itself
@@ -501,22 +576,19 @@ export function CameraApp() {
             .catch((e) => console.warn("Live clip upload failed", e));
         }
 
-        if (info) {
-          setJustCaptured(info);
-          // Show the right toast depending on where the photo ended up:
-          //  - cloud uploaded → "tersimpan di cloud"
-          //  - cloud enabled but failed → warning toast already shown by uploadCapture
-          //  - cloud disabled (offline-first) → "tersimpan lokal"
-          if (info.cloudUploaded) {
-            toast.success("Foto tersimpan di cloud", {
-              description: `${finalWidth}×${finalHeight} · super HD jernih`,
-            });
-          } else if (!settings.cloudUpload) {
-            toast.success("Foto tersimpan lokal", {
-              description: `${finalWidth}×${finalHeight} · super HD jernih`,
-            });
-          }
-        }
+  if (info) {
+   setJustCaptured(info);
+   // Show the right toast depending on where the photo ended up:
+   // - cloud uploaded → "tersimpan di cloud"
+   // - cloud enabled but failed → warning toast already shown by uploadCapture
+   // - cloud disabled (offline-first) → "tersimpan lokal"
+   const qualityTag = `${finalWidth}×${finalHeight} · super HD jernih`;
+   if (info.cloudUploaded) {
+    toast.success("Foto tersimpan di cloud", { description: qualityTag });
+   } else if (!settings.cloudUpload) {
+    toast.success("Foto tersimpan lokal", { description: qualityTag });
+   }
+  }
       } catch (e) {
         console.error(e);
         const msg = e instanceof Error ? e.message : "Gagal memproses foto";
@@ -541,22 +613,22 @@ export function CameraApp() {
       for (let i = 0; i < 5; i++) {
         setBurstCount(i + 1);
         setProcessing(`Burst ${i + 1}/5 — proses HEIC + upload…`);
-        try {
-          const { blob: rawBlob, width, height } = await captureFullResolutionPhoto(
-            videoRef.current,
-            streamRef.current,
-          );
-          const result = await processToHeic(rawBlob, settings);
-          const filename = `kangwifi-burst-${burstId}-${i + 1}.heic`;
-          const info = await uploadCapture(
-            result.blob,
-            result.previewBlob,
-            filename,
-            "image/heic",
-            result.width || width,
-            result.height || height,
-            "burst",
-          );
+   try {
+    const { blob: rawBlob, width, height } = await captureFullResolutionPhoto(
+     videoRef.current,
+     streamRef.current,
+    );
+    const result = await processCapture(rawBlob, settings);
+    const filename = `kangwifi-burst-${burstId}-${i + 1}.${result.ext}`;
+    const info = await uploadCapture(
+     result.blob,
+     result.previewBlob,
+     filename,
+     result.mime,
+     result.width || width,
+     result.height || height,
+     "burst",
+    );
           if (info) {
             lastInfo = info;
             successCount++;
@@ -754,12 +826,14 @@ export function CameraApp() {
     }
   }, [mode, capturePhoto, captureBurst, toggleVideoRecording, runWithTimer]);
 
-  const hdBadge =
-    settings.upscale === 1
-      ? "HD"
-      : settings.upscale === 2
-        ? "2× SUPER HD"
-        : "4× ULTRA HD";
+const gpuActive = detectWebGL().supported;
+const hdBadge =
+ (settings.nightMode ? "🌙 " : gpuActive ? "⚡ " : "") +
+ (settings.upscale === 1
+  ? "HD"
+  : settings.upscale === 2
+   ? "2× SUPER HD"
+   : "4× ULTRA HD");
 
   // CSS-based zoom (fallback when MediaTrackConstraint zoom not supported)
   const cssZoom = settings.zoom > 1 ? settings.zoom : 1;
@@ -768,19 +842,33 @@ export function CameraApp() {
 
   return (
     <div className="fixed inset-0 bg-black text-white select-none">
-      {/* Viewfinder */}
-      <div className="absolute inset-0 z-0 overflow-hidden">
-        <video
-          ref={videoRef}
-          playsInline
-          muted
-          autoPlay
-          className={videoProps.className}
-          style={videoProps.style}
-        />
-        {/* Aspect ratio crop overlay */}
-        <AspectRatioOverlay aspect={settings.aspect} />
-      </div>
+   {/* Viewfinder */}
+   <div className="absolute inset-0 z-0 overflow-hidden">
+    <video
+     ref={videoRef}
+     playsInline
+     muted
+     autoPlay
+     className={videoProps.className}
+     style={videoProps.style}
+    />
+    {/* GPU WYSIWYG preview — draws the SAME grade shader the capture
+        pipeline uses (filters, night mode, exposure, vignette). Hidden
+        when WebGL is unavailable (the <video> above remains). */}
+    <canvas
+     ref={glPreviewRef}
+     className={cn(
+      "absolute inset-0 w-full h-full transition-opacity duration-150",
+      glPreviewActive ? "opacity-100" : "opacity-0",
+     )}
+     style={{
+      transform: videoProps.style.transform,
+      transformOrigin: "center center",
+     }}
+    />
+    {/* Aspect ratio crop overlay */}
+    <AspectRatioOverlay aspect={settings.aspect} />
+   </div>
 
       {/* Flash overlay */}
       <div

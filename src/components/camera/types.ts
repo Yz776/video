@@ -20,33 +20,40 @@ export type AspectRatio = "free" | "1:1" | "4:3" | "16:9" | "3:4";
 
 export type TimerDuration = 0 | 3 | 5 | 10;
 
-export interface CameraSettings {
-  upscale: UpscaleFactor;
-  quality: number;
-  sharpen: boolean;
-  denoise: boolean;
-  enhance: boolean;
-  filter: FilterPreset;
-  aspect: AspectRatio;
-  vignette: boolean;
-  hdr: boolean;
-  grid: boolean;
-  level: boolean;
-  timer: TimerDuration;
-  zoom: number; // 1.0 - 8.0
-  exposure: number; // -1 .. 1
-  contrast: number; // -1 .. 1
-  saturation: number; // -1 .. 1
-  temperature: number; // -1 .. 1
-  /**
-   * When true, captures are uploaded to cloud.kangwifi.eu.org after being
-   * saved locally. When false (default), captures stay only in this
-   * device's IndexedDB — no network upload happens at all.
-   *
-   * Default: false (offline-first). User can enable in Settings.
-   */
-  cloudUpload: boolean;
-}
+ export interface CameraSettings {
+ upscale: UpscaleFactor;
+ quality: number;
+ sharpen: boolean;
+ denoise: boolean;
+ enhance: boolean;
+ filter: FilterPreset;
+ aspect: AspectRatio;
+ vignette: boolean;
+ hdr: boolean;
+ /**
+  * "Mode Malam" — GPU low-light enhancement: stronger edge-preserving
+  * denoise, shadow lift, halo-limited local contrast, gentle highlight
+  * rolloff. Also nudges the sensor's exposure compensation +0.3 EV when
+  * the device supports it.
+  */
+ nightMode: boolean;
+ grid: boolean;
+ level: boolean;
+ timer: TimerDuration;
+ zoom: number; // 1.0 - 8.0
+ exposure: number; // -1 .. 1
+ contrast: number; // -1 .. 1
+ saturation: number; // -1 .. 1
+ temperature: number; // -1 .. 1
+ /**
+  * When true, captures are uploaded to cloud.kangwifi.eu.org after being
+  * saved locally. When false (default), captures stay only in this
+  * device's IndexedDB — no network upload happens at all.
+  *
+  * Default: false (offline-first). User can enable in Settings.
+  */
+ cloudUpload: boolean;
+ }
 
 export interface CaptureItem {
   id: string;
@@ -55,7 +62,7 @@ export interface CaptureItem {
   previewUrl: string;
   liveVideoUrl?: string;
   downloadUrl: string;
-  ext: "heic" | "webm" | "mp4";
+  ext: "heic" | "webm" | "mp4" | "jpg";
   mime: string;
   width?: number;
   height?: number;
@@ -87,17 +94,18 @@ export interface CloudFile {
   createdAt: number;  // Unix ms
 }
 
-export const DEFAULT_SETTINGS: CameraSettings = {
-  upscale: 2,
-  quality: 92,
-  sharpen: true,
-  denoise: true,
-  enhance: true,
-  filter: "none",
-  aspect: "free",
-  vignette: false,
-  hdr: false,
-  grid: true,
+ export const DEFAULT_SETTINGS: CameraSettings = {
+ upscale: 2,
+ quality: 92,
+ sharpen: true,
+ denoise: true,
+ enhance: true,
+ filter: "none",
+ aspect: "free",
+ vignette: false,
+ hdr: false,
+ nightMode: false,
+ grid: true,
   level: false,
   timer: 0,
   zoom: 1,

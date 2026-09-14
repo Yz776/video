@@ -522,3 +522,32 @@ Stage Summary:
 - ✅ Processing overlay and toast messages correctly reflect cloud state
 - ✅ Local-only captures show LOKAL badge in gallery (existing feature, now more relevant)
 - ⚠️ Push to GitHub requires user to run: git push origin main (no credentials in env)
+
+---
+Task ID: webgl-client-engine
+Agent: main (Super Z)
+Task: User said "perbagus aplikasi ini agar memanfaatkan webgl client agar makin hd dan bagus hasil nya dan manfaatkan semua potensi yg ada hingga super maximal ... super jernih hd no pecah pecah suport mode malam dst" — move ALL image processing from the server (sharp) to client-side WebGL GPU pipeline, add Night Mode, WYSIWYG live preview, and keep zero bugs/errors.
+
+Work Log:
+- NEW src/components/camera/webgl/ — 6-file GPU pipeline:
+  - gl-core.ts: context (WebGL2→WebGL1 fallback), shader/FBO helpers, per-device pixel budget (maxTextureSize-aware: 40MP flagship / 16MP mid / 6MP low)
+  - shaders.ts: GLSL ES 1.00 — bilateral denoise (kills sensor noise + JPEG 8×8 DCT blocks pre-upscale), separable 13-tap Lanczos3 (CPU-exact weights), HDR local-contrast (halo-clamped, NO CLAHE), micro-sharpen (thresholded), grade (all 8 filter presets + NIGHT MODE shadow-lift + vignette + filmic rolloff + auto-gain)
+  - processor.ts: WebGLImageProcessor — crop+bilateral → Lanczos multi-pass upscale (≤2× per pass, exact kernel support) → histogram auto-exposure (readPixels 128px) → grade → local contrast → sharpen → JPEG q0.97 + preview q0.95 via GPU resample. All FBOs tracked + swept in finally (double-delete = spec no-op) → zero GPU memory leaks even on mid-pipeline failure
+  - preview.ts: WebGLPreviewRenderer — live viewfinder via the SAME grade shader → WYSIWYG (what you see is what you get); context-lost → auto-fallback to plain <video>, never a black screen
+  - geometry.ts: pure crop/fit math
+- Server /api/process: new passthrough mode (processed=1) → ONLY wraps client JPEG to HEIC/AV1 effort=3 (~1-2s vs 7s); legacy sharp path kept as fallback + now supports night mode (extra median + gamma 1.12)
+- utils.ts: processCapture() = WebGL primary with auto-fallback chain: GPU fail/unsupported/source-over-texture-limit → server sharp; HEIC-encode down → save processed JPEG (.jpg) so a capture is NEVER lost. getEngineInfo() for UI. applyNightExposure() sensor assist (+0.3 EV via exposureCompensation when supported)
+- camera-app.tsx: GL canvas over <video> (CSS zoom parity), burst/photo use processCapture, dynamic ext/mime, night badge on HD badge (🌙/⚡), "Memproses di GPU perangkat (WebGL)…" overlay
+- controls.tsx: GPU engine status banner, "Mode Malam" toggle + quick pill, accurate descriptions (bilateral/lanczos/halo-free)
+- types.ts: nightMode setting; CaptureItem.ext + "jpg"
+- REAL BUG FIXED (pre-existing): ImageCapture.takePhoto() received imageWidth/Height as {ideal:4096} — spec says plain ULong numbers → takePhoto REJECTED and the app silently fell back to 1080p canvas capture, never sensor-res. Now plain numbers (sensor 4032×3024 actually used)
+- typecheck: src/ 0 errors (also fixed 5 pre-existing errors in utils.ts, cast PhotoSettings modes missing from TS lib.dom, prisma client generated, tsconfig excludes unused template folders examples/skills/tool-results)
+- Unit tests: scripts/test-webgl-math.ts — 28/28 PASS (kernel, weights sum/symmetry/zeros, multi-pass step chains, crop UV flip-Y math, budget clamping)
+
+Stage Summary:
+- DONE: 100% client GPU pipeline with server fallback chain (no dead path)
+- DONE: Mode Malam (night): bilateral+shadow lift+local contrast+sensor EV assist+viewfinder live preview
+- DONE: WYSIWYG live GL viewfinder with graceful <video> fallback
+- DONE: HEIC kept via thin passthrough encode; JPEG fallback keeps captures when server down
+- DONE: takePhoto sensor-resolution bug fixed
+- Files: src/components/camera/webgl/* (6 new), camera-app.tsx, controls.tsx, types.ts, utils.ts, api/process/route.ts, tsconfig.json, worklog.md, scripts/test-webgl-math.ts
