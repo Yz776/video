@@ -437,25 +437,31 @@ export class WebGLImageProcessor {
     let prevFbo: FBO | null = null; // previous INTERMEDIATE fbo (destroyed once superseded)
     const steps = buildScaleSteps(cw, ch, w, h, mode);
     for (const [nw, nh] of steps) {
-      const factor = nw / cw;
-      const { wts, offs } = lanczosWeights(factor, RESAMPLE_TAPS);
-      const hfbo = this.makeFBO(nw, nh);
+      const factorX = nw / cw; // horizontal: src width → dest width
+      const factorY = nh / ch; // vertical: src height → dest height
+      const { wts: wx, offs: ox } = lanczosWeights(factorX, RESAMPLE_TAPS);
+      const { wts: wy, offs: oy } = lanczosWeights(factorY, RESAMPLE_TAPS);
+      // H pass: (cw×ch) → (nw×ch). NOTE: the intermediate keeps the SOURCE
+      // height — a full (nw,nh) intermediate here would bilinear-stretch the
+      // vertical axis before the V pass ever runs (soft/washed output).
+      const hfbo = this.makeFBO(nw, ch);
       gl.bindFramebuffer(gl.FRAMEBUFFER, hfbo.fb);
       this.resample.v2("u_dir", 1, 0);
-      this.resample.v2("u_texel", 1 / nw, 1 / nh);
-      this.resample.floatArray("u_w", wts);
-      this.resample.floatArray("u_off", offs);
+      this.resample.v2("u_texel", 1 / nw, 1 / ch);
+      this.resample.floatArray("u_w", wx);
+      this.resample.floatArray("u_off", ox);
       this.resample.uvTransform(1, 1, 0, 0);
-      if (!this.resample.draw(tex, nw, nh, this.quad)) {
+      if (!this.resample.draw(tex, nw, ch, this.quad)) {
         destroyFBO(gl, hfbo);
         throw new Error("resample H failed");
       }
+      // V pass: (nw×ch) → (nw×nh)
       const vfbo = this.makeFBO(nw, nh);
       gl.bindFramebuffer(gl.FRAMEBUFFER, vfbo.fb);
       this.resample.v2("u_dir", 0, 1);
       this.resample.v2("u_texel", 1 / nw, 1 / nh);
-      this.resample.floatArray("u_w", wts);
-      this.resample.floatArray("u_off", offs);
+      this.resample.floatArray("u_w", wy);
+      this.resample.floatArray("u_off", oy);
       this.resample.uvTransform(1, 1, 0, 0);
       if (!this.resample.draw(hfbo.tex, nw, nh, this.quad)) {
         destroyFBO(gl, hfbo);

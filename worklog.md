@@ -551,3 +551,22 @@ Stage Summary:
 - DONE: HEIC kept via thin passthrough encode; JPEG fallback keeps captures when server down
 - DONE: takePhoto sensor-resolution bug fixed
 - Files: src/components/camera/webgl/* (6 new), camera-app.tsx, controls.tsx, types.ts, utils.ts, api/process/route.ts, tsconfig.json, worklog.md, scripts/test-webgl-math.ts
+
+---
+Task ID: fix-blank-black-photos
+Agent: main (Super Z)
+Task: User reported "hasil foto nya blank hitam" — photos from the WebGL camera pipeline come out blank black.
+
+Work Log:
+- Reproduced with a real-GPU browser harness (tests/webgl-harness: esbuild bundles of the actual engine modules + in-page pixel assertions). ALL 8 cases rendered mean=0,0,0 — reproduced exactly.
+- Built diag.html reading back EVERY stage (upload→copy→bilateral→grade→blit) via readPixels + gl.getError(). Found: the FIRST copy pass already rendered a single solid color exactly equal to the texture's (0,0) texel → v_uv was constant (0,0) in the vertex stage.
+- ROOT CAUSE: every uniform was set BEFORE gl.useProgram() (useProgram only ran inside drawPass at draw time). gl.uniform* with no matching bound program = GL_INVALID_OPERATION silently swallowed → ALL uniforms stayed at defaults: u_uvScale=(0,0) collapsed every fragment's uv to texel (0,0) → whole photo = one corner pixel (usually dark ⇒ "blank hitam"). Same bug affected the live GL viewfinder (shared Program class).
+- FIX (one place): Program class now calls useProgram() before EVERY uniform setter and before draw (program.ts). Covers processor + preview + all future programs.
+- Also fixed while here: separable resample used full (nw,nh) FBO for the H pass, bilinear-stretching the vertical axis before the V pass ran (soft/washed vertical detail). H pass now outputs (nw × srcH), V pass (nw × nh), per-axis factors/weights/texels.
+- VERIFY: diag per-stage means correct (copy 128³, grade 128³, canvas blit 129³); full harness 16/16 PASS (8 cases × WebGL2 + forced WebGL1) incl. 4032×3024 phone-like source (6651×4988 under the 40MP budget) and hue-order assertions; /api/process passthrough + legacy + night validated with sharp (HEIF ftyp avif, correct dims & means); tsc 0 errors; math unit tests ALL PASS.
+- Artifacts: tests/webgl-harness/{index,diag,serve,README} + bundles; scripts/test-server-passthrough.js.
+
+Stage Summary:
+- FIXED: blank/black photos — uniforms-before-useProgram root cause (one-line-class fix, engine-wide effect)
+- FIXED: vertical bilinear softness in the multi-pass Lanczos upscale
+- VERIFIED on real GPU (Intel HD 520 / ANGLE D3D11): WebGL2 AND WebGL1, 16/16 pixel assertions + 4/4 server encodes

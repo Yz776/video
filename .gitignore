@@ -54,3 +54,4 @@ prompt
 server.log
 # Skills directory
 /skills/package-lock.json
+scripts/.test-webgl-math.mjs

@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="id">
+<head><meta charset="utf-8"><title>stage diag</title></head>
+<body>
+<pre id="out">running…</pre>
+<script type="module">
+import { createContext, createTextureFromSource, createFBO, destroyFBO, drawPass, pixelBudget } from './gl-core-bundle.js';
+import { Program } from './program-bundle.js';
+import { VERT_QUAD, FRAG_COPY, FRAG_BILATERAL, FRAG_GRADE, FRAG_SHARPEN, FILTER_TO_INT } from './shaders-bundle.js';
+
+const out = document.getElementById('out');
+const R = { stages: [], done: false };
+window.__DIAG = R;
+
+function mkSrc() {
+  const cv = document.createElement('canvas');
+  cv.width = 256; cv.height = 256;
+  const c = cv.getContext('2d');
+  c.fillStyle = '#e01818'; c.fillRect(0, 0, 128, 128);
+  c.fillStyle = '#18b818'; c.fillRect(128, 0, 128, 128);
+  c.fillStyle = '#1840e0'; c.fillRect(0, 128, 128, 128);
+  c.fillStyle = '#f0f0f0'; c.fillRect(128, 128, 128, 128);
+  return cv;
+}
+
+// read whole FBO back as mean rgba
+function readFBO(gl, fbo) {
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo.fb);
+  const n = fbo.width * fbo.height;
+  const buf = new Uint8Array(Math.min(n, 65536) * 4);
+  gl.readPixels(0, 0, Math.min(fbo.width, 256), Math.min(fbo.height, 256), gl.RGBA, gl.UNSIGNED_BYTE, buf);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  let r = 0, g = 0, b = 0, a = 0;
+  const m = Math.min(n, 65536);
+  for (let i = 0; i < m; i++) { r += buf[i*4]; g += buf[i*4+1]; b += buf[i*4+2]; a += buf[i*4+3]; }
+  const err = gl.getError();
+  return { mean: [r/m|0, g/m|0, b/m|0, a/m|0], glErr: err };
+}
+
+try {
+  const cv = document.createElement('canvas');
+  cv.width = 256; cv.height = 256;
+  const ctx = createContext(cv, { preserveDrawingBuffer: true });
+  if (!ctx) throw new Error('no ctx');
+  const gl = ctx.gl;
+  R.info = { webgl2: ctx.webgl2, maxTex: ctx.maxTextureSize };
+  const quad = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+
+  const copy = new Program(gl, VERT_QUAD, FRAG_COPY);
+  const stage = (name, o) => { R.stages.push({ name, ...o }); out.textContent += name + ': ' + JSON.stringify(o) + '\n'; };
+
+  // upload source
+  const tex = createTextureFromSource(gl, mkSrc());
+  stage('upload-source', { ok: !!tex, glErr: gl.getError() });
+
+  // S1: copy → FBO
+  const f1 = createFBO(gl, 256, 256);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, f1.fb);
+  copy.uvTransform(1, 1, 0, 0);
+  const ok1 = copy.draw(tex, 256, 256, quad);
+  stage('S1-copy-to-fbo', { drawOk: ok1, ...readFBO(gl, f1) });
+
+  // S2: bilateral → FBO
+  const bil = new Program(gl, VERT_QUAD, FRAG_BILATERAL);
+  const f2 = createFBO(gl, 256, 256);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, f2.fb);
+  bil.v2('u_texel', 1/256, 1/256);
+  bil.f('u_sigmaS', 1.7); bil.f('u_sigmaR', 0.08); bil.f('u_strength', 0.8);
+  bil.uvTransform(1, 1, 0, 0);
+  const ok2 = bil.draw(f1.tex, 256, 256, quad);
+  stage('S2-bilateral', { drawOk: ok2, ...readFBO(gl, f2) });
+
+  // S3: grade → FBO
+  const grade = new Program(gl, VERT_QUAD, FRAG_GRADE);
+  const f3 = createFBO(gl, 256, 256);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, f3.fb);
+  grade.f('u_exposure', 0); grade.f('u_contrast', 0); grade.f('u_saturation', 0);
+  grade.f('u_temperature', 0); grade.f('u_autoGain', 1); grade.f('u_gamma', 1.02);
+  grade.f('u_tone', 0); grade.f('u_vig', 0); grade.f('u_aspect', 1);
+  grade.i('u_filter', 0); grade.f('u_night', 0);
+  grade.uvTransform(1, 1, 0, 0);
+  const ok3 = grade.draw(f2.tex, 256, 256, quad);
+  stage('S3-grade', { drawOk: ok3, ...readFBO(gl, f3) });
+
+  // S4: blit to canvas + toBlob
+  cv.width = 256; cv.height = 256;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  copy.uvTransform(1, 1, 0, 0);
+  const ok4 = copy.draw(f3.tex, 256, 256, quad);
+  // readPixels from default framebuffer immediately
+  const buf = new Uint8Array(256 * 256 * 4);
+  gl.readPixels(0, 0, 256, 256, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+  let r = 0; for (let i = 0; i < 256*256; i++) r += buf[i*4];
+  const blob = await new Promise(res => cv.toBlob(res, 'image/jpeg', 0.95));
+  const bmp = await createImageBitmap(blob);
+  const cv2 = document.createElement('canvas'); cv2.width = 64; cv2.height = 64;
+  const c2 = cv2.getContext('2d'); c2.drawImage(bmp, 0, 0, 64, 64);
+  const d = c2.getImageData(0, 0, 64, 64).data;
+  let rr = 0, gg = 0, bb = 0; for (let i = 0; i < 64*64; i++) { rr += d[i*4]; gg += d[i*4+1]; bb += d[i*4+2]; }
+  stage('S4-blit-canvas', { drawOk: ok4, readPixelsMeanR: r / 65536 | 0, blobSize: blob.size, blobMean: [rr/4096|0, gg/4096|0, bb/4096|0], glErr: gl.getError() });
+
+  R.done = true;
+  out.textContent += 'DONE';
+} catch (e) {
+  R.done = true; R.fatal = String(e && e.message || e);
+  out.textContent += 'FATAL ' + R.fatal;
+}
+</script>
+</body>
+</html>
